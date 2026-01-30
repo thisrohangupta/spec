@@ -1,0 +1,1502 @@
+# =============================================================================
+# Pipeline YAML Generation Guidelines
+# =============================================================================
+# These guidelines are designed for an LLM agent (Claude 4.5 Opus) to generate
+# valid Harness pipeline YAML. Each section includes the authoritative schema
+# definition followed by concrete examples.
+#
+# IMPORTANT: The agent MUST follow these rules to produce valid YAML. When in
+# doubt, prefer the example syntax shown here over any prior training data.
+# =============================================================================
+
+guidelines:
+
+  # ===========================================================================
+  # 1. ROOT DOCUMENT STRUCTURE
+  # ===========================================================================
+  # The YAML root is a Schema object. The agent must understand this hierarchy
+  # to avoid placing fields at the wrong nesting level.
+
+  - section: Root Document Structure
+    rules:
+      - "The YAML root is a Schema object. For pipelines, the root MUST contain 'pipeline:' as a top-level key."
+      - "Other valid root-level keys: version, environment, service, infrastructure, template, inputset."
+      - "Do NOT place stages, steps, or pipeline fields at the YAML root level."
+      - "Platform-specific metadata fields (identifier, orgIdentifier, projectIdentifier, description) are Harness platform wrappers and are NOT part of the pipeline spec schema. They sit outside/above the pipeline spec."
+    examples:
+      minimal_pipeline: |
+        pipeline:
+          stages:
+          - steps:
+            - run: go build
+      with_version: |
+        version: 1
+        pipeline:
+          stages:
+          - steps:
+            - run: go build
+      template_definition: |
+        template:
+          inputs:
+            version:
+              type: string
+          step:
+            run:
+              script: go build
+              container: golang:${{ inputs.version }}
+
+  # ===========================================================================
+  # 2. PIPELINE FIELDS
+  # ===========================================================================
+  # Complete field inventory from pipeline.ts. Fields marked @deprecated or
+  # @github are noted. The agent should use non-deprecated fields.
+
+  - section: Pipeline Fields
+    rules:
+      - "Pipeline MUST have 'stages' (array of 1+ Stage objects)."
+      - "All other pipeline fields are optional."
+      - "Fields 'id' and 'name' exist but are @deprecated."
+      - "Do NOT use non-existent fields like 'notifications' or 'tags' on pipeline."
+    fields:
+      stages: "Stage[] — Required. The stages to execute sequentially."
+      inputs: "Record<string, Input> — Pipeline input variables."
+      env: "Record<string, string> — Global environment variables propagated to all steps."
+      clone: "boolean | CloneLong — Override default clone behavior. Use false to disable."
+      repo: "Repository — Override default repository (name, connector)."
+      delegate: "string | string[] — Default delegate for execution."
+      environment: "EnvironmentRef — Target deployment environment."
+      service: "ServiceRef — Service being deployed."
+      barriers: "string[] — Named barriers referenced by barrier steps."
+      if: "string — Conditional execution expression (${{ expr }})."
+      on: "On — Trigger event configuration (push, pull_request, schedule, etc.)."
+      timeout: "string — Duration format (e.g., '10m', '1h')."
+      status: "Status — Override default status check behavior."
+      concurrency: "Concurrency — Limit concurrent pipeline executions."
+    deprecated_fields:
+      id: "string — @deprecated"
+      name: "string — @deprecated"
+    github_compat_fields:
+      jobs: "Record<string, Stage> — GitHub Actions compatibility."
+      permissions: "Permissions — Token permissions (GitHub Actions compat)."
+      default: "any — Default settings (GitHub Actions compat)."
+    example: |
+      pipeline:
+        inputs:
+          version:
+            type: string
+            default: "1.20"
+        env:
+          GOOS: linux
+        clone:
+          depth: 50
+        on:
+        - push:
+            branches: [main]
+        - pull_request:
+            branches: [main]
+        barriers:
+        - deploy-gate
+        stages:
+        - steps:
+          - run:
+              script: go build
+              container: golang:${{ inputs.version }}
+
+  # ===========================================================================
+  # 3. INPUTS (Variables)
+  # ===========================================================================
+
+  - section: Input Variables
+    rules:
+      - "'type' is the ONLY required field on an Input."
+      - "Valid types: string, number, boolean, array, duration, secret, choice, environment."
+      - "Do NOT use types that don't exist: object, step, stage, connector."
+      - "'options' is a GitHub-compat alias for 'enum' — prefer 'enum'."
+    fields:
+      type: "Required. One of: string | number | boolean | array | duration | choice | environment | secret"
+      description: "string — Human-readable description."
+      default: "any — Default value."
+      required: "boolean — Whether the input is required."
+      items: "any[] — Array type definition."
+      enum: "any[] — List of accepted values."
+      pattern: "string — Regex constraint."
+      options: "any[] — Alias for enum (@github compat)."
+    examples:
+      basic: |
+        inputs:
+          version:
+            type: string
+            default: "1.20"
+      with_enum: |
+        inputs:
+          env:
+            type: string
+            enum: ["dev", "staging", "prod"]
+      with_pattern: |
+        inputs:
+          semver:
+            type: string
+            pattern: "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+      secret: |
+        inputs:
+          api_key:
+            type: secret
+      boolean_with_default: |
+        inputs:
+          skip_tests:
+            type: boolean
+            default: false
+
+  # ===========================================================================
+  # 4. STAGES
+  # ===========================================================================
+
+  - section: Stages
+    rules:
+      - "A stage is a unified node. There is NO explicit 'type' field."
+      - "Stage type is inferred from which discriminator field is set:"
+      - "  steps: [...]              -> normal execution stage"
+      - "  group: { stages: [...] }  -> stage group (sequential)"
+      - "  parallel: { stages: [...] } -> parallel stage group"
+      - "  approval: { uses, with }  -> approval gate stage"
+      - "  template: { uses, with }  -> stage template reference"
+      - "A stage MUST set exactly one of: steps, group, parallel, approval, or template."
+      - "The field for exporting variables is 'outputs', NOT 'exports'."
+    fields:
+      id: "string — Stage identifier."
+      name: "string — Display name."
+      if: "string — Conditional execution (${{ expr }})."
+      steps: "Step[] — Steps to execute."
+      group: "StageGroup — Sequential stage group { stages: Stage[] }."
+      parallel: "StageGroup — Parallel stage group { stages: Stage[] }."
+      approval: "StageApproval — Approval gate { uses, with }."
+      template: "StageTemplate — Template reference { uses, with }."
+      strategy: "Strategy — Matrix or loop strategy."
+      delegate: "string | string[] — Execution delegate."
+      runtime: "Runtime — Execution runtime (cloud | kubernetes | shell | vm)."
+      platform: "Platform — Target OS/arch."
+      clone: "boolean | CloneLong — Override clone behavior."
+      cache: "Cache — Cache configuration."
+      workspace: "Workspace — Workspace path config."
+      env: "Record<string, string> — Stage environment variables."
+      volumes: "Volume[] — Volume definitions."
+      outputs: "Record<string, any> — Export variables for other stages."
+      on-failure: "FailureStrategy — Error handling."
+      rollback: "Step — Rollback step definition."
+      service: "ServiceRef — Deployment target service."
+      environment: "EnvironmentRef — Deployment target environment."
+      concurrency: "Concurrency — Concurrency limits."
+      status: "Status — Override status check behavior."
+      needs: "string | string[] — Stage dependencies (@github compat)."
+      runs-on: "string — Machine type (@github compat)."
+      services: "Record<string, Container> — Background services (@github compat)."
+    examples:
+      basic_stage: |
+        - steps:
+          - run: go build
+          - run: go test
+      named_stage_with_container: |
+        - name: build
+          steps:
+          - run:
+              script: go build
+              container: golang:1.20
+      conditional_stage: |
+        - name: deploy
+          if: ${{ branch == "main" }}
+          steps:
+          - run: ./deploy.sh
+      stage_with_matrix: |
+        - name: test
+          strategy:
+            matrix:
+              version: ["1.19", "1.20", "1.21"]
+          steps:
+          - run:
+              script: go test
+              container: golang:${{ matrix.version }}
+      parallel_stages: |
+        - parallel:
+            stages:
+            - name: unit-tests
+              steps:
+              - run: go test ./...
+            - name: lint
+              steps:
+              - run: golangci-lint run
+      stage_group: |
+        - group:
+            stages:
+            - name: build
+              steps:
+              - run: go build
+            - name: test
+              steps:
+              - run: go test
+      stage_with_failure: |
+        - steps:
+          - run: go test
+          on-failure:
+            errors: all
+            action: ignore
+      stage_with_outputs: |
+        - id: build-stage
+          steps:
+          - id: build-step
+            run:
+              script: |
+                echo "version=1.0.0" >> $HARNESS_OUTPUT
+          outputs:
+            app_version: ${{ steps.build-step.outputs.version }}
+      stage_template: |
+        - template:
+            uses: account.golang@1.0.0
+            with:
+              version: "1.20"
+
+  # ===========================================================================
+  # 5. STEPS
+  # ===========================================================================
+
+  - section: Steps
+    rules:
+      - "A Step can be one of three forms:"
+      - "  1. A plain string (shortest): 'go build' — treated as a run script."
+      - "  2. Short run: 'run: go build' — string value is the script."
+      - "  3. Long form: an object with ONE step type key plus optional controls."
+      - "Step type keys (set EXACTLY ONE per step object):"
+      - "  run, run-test, action, background, clone, barrier, queue, approval, template, group, parallel"
+      - "Do NOT mix multiple step type keys in a single step object."
+      - "There is NO 'wait' step type. Use 'action: { uses: wait, with: { duration: 10m } }' instead."
+      - "There is NO 'policy' step type. Use 'action: { uses: policy, with: {...} }' instead."
+    common_controls:
+      id: "string — Step identifier for referencing outputs."
+      name: "string — Display name."
+      if: "string — Conditional execution (${{ expr }})."
+      timeout: "string — Duration (e.g., '10m', '30s')."
+      needs: "string | string[] — Step dependencies."
+      strategy: "Strategy — Matrix or loop strategy."
+      status: "Status — Override status check behavior."
+      on-failure: "FailureStrategy — Error handling."
+      delegate: "Delegate — Execution delegate ('inherit-from-infrastructure' | string | string[])."
+      env: "Record<string, string> — Step environment variables (@github compat)."
+
+  # ---------------------------------------------------------------------------
+  # 5a. Run Step
+  # ---------------------------------------------------------------------------
+  - section: "Step Type: run"
+    rules:
+      - "'run' executes shell scripts. It can be a string (short) or StepRun object (long)."
+      - "StepRun fields: shell, script, container, env, report."
+      - "Do NOT use non-existent fields like 'download' or 'output' on run steps."
+      - "'script' can be a string (including multiline via YAML '|') or an array of strings."
+      - "'container' can be a string (image name) or ContainerLong object."
+      - "'shell' values: sh, bash, powershell, pwsh, python."
+    examples:
+      shortest_form: |
+        - go build
+      short_form: |
+        - run: go build
+      long_form: |
+        - run:
+            script: go build
+            container: golang:1.20
+      with_shell_and_env: |
+        - run:
+            shell: bash
+            script: go build -o app
+            container: golang
+            env:
+              GOOS: linux
+              GOARCH: amd64
+      multiline_script: |
+        - run:
+            script: |
+              go build -o app
+              go test ./...
+      script_as_array: |
+        - run:
+            script:
+            - go build
+            - go test
+      with_report: |
+        - run:
+            script: go test -v
+            report:
+              type: junit
+              path: report.xml
+      with_detailed_container: |
+        - run:
+            script: go build
+            container:
+              image: golang:1.20
+              pull: if-not-exists
+              privileged: false
+              memory: 2gb
+              cpu: 2
+              volumes:
+              - source: docker
+                target: /var/run/docker.sock
+
+  # ---------------------------------------------------------------------------
+  # 5b. Run-Test Step
+  # ---------------------------------------------------------------------------
+  - section: "Step Type: run-test"
+    rules:
+      - "'run-test' executes tests with test intelligence and splitting support."
+      - "Fields: shell, script, container, env, report, match, splitting, intelligence."
+    examples:
+      basic: |
+        - run-test:
+            script: mvn test
+            container: maven
+      with_intelligence: |
+        - run-test:
+            script: mvn test
+            container: maven
+            match:
+            - "tests/**/*.java"
+            splitting:
+              concurrency: 4
+            intelligence:
+              disabled: false
+            report:
+              type: junit
+              path: /path/to/junit.xml
+      multiple_reports: |
+        - run-test:
+            script: mvn test
+            report:
+            - type: junit
+              path: /path/to/backend/junit.xml
+            - type: junit
+              path: /path/to/frontend/junit.xml
+
+  # ---------------------------------------------------------------------------
+  # 5c. Background Step
+  # ---------------------------------------------------------------------------
+  - section: "Step Type: background"
+    rules:
+      - "'background' runs a service in the background. Uses same config as StepRun."
+      - "Common use: start a database or service before test steps."
+    examples:
+      simple: |
+        - background:
+            container: redis
+      with_ports: |
+        - background:
+            container:
+              image: postgres:14
+              ports:
+              - "5432:5432"
+            env:
+              POSTGRES_PASSWORD: test
+
+  # ---------------------------------------------------------------------------
+  # 5d. Action Step
+  # ---------------------------------------------------------------------------
+  - section: "Step Type: action"
+    rules:
+      - "'action' runs a reusable action. Fields: uses, with, env, report."
+      - "'uses' specifies the action name (optionally with @version)."
+      - "'with' provides action configuration parameters."
+      - "For wait/sleep, use: action: { uses: wait, with: { duration: 10m } }"
+      - "For HTTP requests, use: action: { uses: harness/http-arm, with: { url, method, ... } }"
+    examples:
+      basic: |
+        - action:
+            uses: docker-build-push-action
+            with:
+              push: true
+              tags: latest
+      wait_action: |
+        - action:
+            uses: wait
+            with:
+              duration: 10m
+      kubernetes_deploy: |
+        - action:
+            uses: kubernetes-rolling-deploy
+            with:
+              dry-run: false
+              skip-versioning: true
+
+  # ---------------------------------------------------------------------------
+  # 5e. Template Step
+  # ---------------------------------------------------------------------------
+  - section: "Step Type: template"
+    rules:
+      - "'template' references a reusable step template."
+      - "Fields: uses (template name@version), with (input overrides), env."
+    examples:
+      basic: |
+        - template:
+            uses: npm
+            with:
+              version: 19
+      versioned: |
+        - template:
+            uses: gitleaksStep@1.0.0
+            with:
+              configuration: default
+              mode: orchestratedScan
+      named: |
+        - name: Docker build and push
+          template:
+            uses: buildAndPushToHAR@1.0.0
+            with:
+              connector: account.dockerhar
+              repo: my-org/my-repo/my-image
+              tags:
+              - latest
+
+  # ---------------------------------------------------------------------------
+  # 5f. Clone Step
+  # ---------------------------------------------------------------------------
+  - section: "Step Type: clone"
+    rules:
+      - "'clone' clones a git repository."
+      - "Fields: repo, connector, depth, disabled, insecure, lfs, path, strategy, submodules, tags, trace, ref, filter, set-safe-directory, sparse-checkout, sparse-checkout-cone-mode, clean."
+    example: |
+      - clone:
+          repo: my-org/my-repo
+          connector: account.github
+          depth: 1
+          lfs: true
+
+  # ---------------------------------------------------------------------------
+  # 5g. Barrier Step
+  # ---------------------------------------------------------------------------
+  - section: "Step Type: barrier"
+    rules:
+      - "'barrier' synchronizes pipeline execution."
+      - "'barrier.name' is REQUIRED and must match an entry in 'pipeline.barriers'."
+    example: |
+      pipeline:
+        barriers:
+        - deploy-gate
+        stages:
+        - steps:
+          - run: prepare-deployment
+          - barrier:
+              name: deploy-gate
+          - run: deploy
+
+  # ---------------------------------------------------------------------------
+  # 5h. Queue Step
+  # ---------------------------------------------------------------------------
+  - section: "Step Type: queue"
+    rules:
+      - "'queue' gates execution on a resource queue."
+      - "'queue.key' is REQUIRED."
+      - "'queue.scope' is OPTIONAL (values: 'pipeline' | 'stage')."
+    example: |
+      - timeout: 30m
+        queue:
+          key: deploy-lock
+          scope: pipeline
+
+  # ---------------------------------------------------------------------------
+  # 5i. Approval Step
+  # ---------------------------------------------------------------------------
+  - section: "Step Type: approval"
+    rules:
+      - "'approval' creates an approval gate."
+      - "Fields: uses (approval provider), with (provider config), env."
+      - "Common 'uses' values: jira, harness, servicenow, custom."
+    example: |
+      - approval:
+          uses: jira
+          with:
+            connector: account.jira
+            project: DEPLOY
+            timeout: 30m
+
+  # ---------------------------------------------------------------------------
+  # 5j. Parallel & Group Steps
+  # ---------------------------------------------------------------------------
+  - section: "Step Types: parallel and group"
+    rules:
+      - "'parallel' runs steps concurrently. 'group' runs steps sequentially."
+      - "Both require 'steps' array inside."
+    examples:
+      parallel: |
+        - parallel:
+            steps:
+            - run: go build
+            - run: npm test
+      group: |
+        - group:
+            steps:
+            - run: go build
+            - run: go test
+      parallel_with_mixed_types: |
+        - parallel:
+            steps:
+            - name: Go build
+              run:
+                container: golang:1.25.3
+                script: go build -o app .
+            - name: Go test with coverage
+              run:
+                container: golang:1.25.3
+                script: |
+                  go test -v -coverprofile=coverage.out ./...
+            - name: Secret leak check
+              template:
+                uses: gitleaksStep@1.0.0
+                with:
+                  configuration: default
+                  mode: orchestratedScan
+            - name: Docker build and push
+              template:
+                uses: buildAndPushToHAR@1.0.0
+                with:
+                  connector: account.dockerhar
+                  repo: my-org/my-image
+                  tags:
+                  - latest
+
+  # ===========================================================================
+  # 6. EXPRESSION SYNTAX
+  # ===========================================================================
+
+  - section: Expression Syntax
+    rules:
+      - "Use ${{ expr }} for dynamic values in 'if' conditions, field values, and string interpolation."
+      - "Available expression contexts:"
+      - "  ${{ branch }}                          — Current branch name"
+      - "  ${{ inputs.name }}                     — Pipeline input value"
+      - "  ${{ matrix.key }}                      — Matrix strategy variable"
+      - "  ${{ for.iteration }}                   — Loop iteration index"
+      - "  ${{ steps.stepId.outputs.key }}        — Step output variable"
+      - "  ${{ stages.stageId.outputs.key }}      — Stage output variable"
+      - "  ${{ status }}                          — Current execution status"
+      - "To write output variables from a step, use: echo 'key=value' >> $HARNESS_OUTPUT"
+      - "To export stage outputs, define an 'outputs' map on the stage."
+      - "Harness expression syntax (<+expr>) is also valid in some contexts:"
+      - "  <+secrets.getValue('secret_id')>       — Secret reference"
+      - "  <+input>                                — Runtime input placeholder"
+      - "  <+infra.namespace>                      — Infrastructure reference"
+    examples:
+      conditional: |
+        if: ${{ branch == "main" }}
+      input_interpolation: |
+        container: golang:${{ inputs.version }}
+      matrix_reference: |
+        container: node:${{ matrix.node }}
+      step_to_stage_output: |
+        # Step writes output
+        - id: build-step
+          run:
+            script: |
+              echo "version=1.0.0" >> $HARNESS_OUTPUT
+
+        # Stage exports it
+        - id: build-stage
+          steps:
+          - id: build-step
+            run:
+              script: echo "version=1.0.0" >> $HARNESS_OUTPUT
+          outputs:
+            app_version: ${{ steps.build-step.outputs.version }}
+
+        # Downstream stage references it
+        - steps:
+          - run:
+              script: echo "deploying ${{ stages.build-stage.outputs.app_version }}"
+
+  # ===========================================================================
+  # 7. STRATEGY (Matrix / Looping)
+  # ===========================================================================
+
+  - section: Strategy
+    rules:
+      - "Strategy supports three modes: matrix, for, while. There is NO 'repeat' mode."
+      - "Strategy can be applied at stage level or step level."
+      - "Matrix creates a cartesian product of all specified axes."
+      - "'max-parallel' and 'fail-fast' are GitHub compat fields."
+    fields:
+      matrix: "Record<string, any[]> with optional include/exclude arrays."
+      for: "{ iterations: number } — fixed iteration count."
+      while: "{ iterations?: number, condition?: string } — conditional loop."
+      max-parallel: "number — Max concurrent executions (@github compat)."
+      fail-fast: "boolean — Cancel siblings on failure (@github compat)."
+    examples:
+      matrix: |
+        strategy:
+          matrix:
+            go: ["1.19", "1.20", "1.21"]
+            os: [linux, windows]
+            exclude:
+            - go: "1.19"
+              os: windows
+            include:
+            - go: "1.22"
+              os: linux
+      for_loop: |
+        strategy:
+          for:
+            iterations: 10
+      while_loop: |
+        strategy:
+          while:
+            iterations: 100
+            condition: ${{ status == "failure" }}
+
+  # ===========================================================================
+  # 8. FAILURE STRATEGY
+  # ===========================================================================
+
+  - section: Failure Strategy (on-failure)
+    rules:
+      - "'on-failure' can be set at stage level or step level."
+      - "Fields: errors (FailureType | FailureType[]), action (Action)."
+      - "Both 'errors' and 'action' are optional per the schema, but should both be set for clarity."
+      - "Error types: all, approval-rejection, authentication, authorization, connectivity, delegate-provisioning, delegate-restart, input-timeout, policy-evaluation, timeout, unknown, verification, user-mark-fail."
+      - "Action can be a string (simple) or object (with config)."
+      - "Simple action strings: abort, fail, ignore, retry, retry-step-group, stage-rollback, pipeline-rollback, manual-intervention, success."
+    examples:
+      simple_abort: |
+        on-failure:
+          errors: all
+          action: abort
+      ignore_errors: |
+        on-failure:
+          errors: [unknown, connectivity]
+          action: ignore
+      retry_with_config: |
+        on-failure:
+          errors: all
+          action:
+            retry:
+              attempts: 5
+              interval: 10s
+              failure-action: fail
+      retry_with_staggered_intervals: |
+        on-failure:
+          errors: all
+          action:
+            retry:
+              attempts: 5
+              interval: [10s, 30s, 1m, 5m, 10m]
+              failure-action: fail
+      manual_intervention: |
+        on-failure:
+          errors: all
+          action:
+            manual-intervention:
+              timeout: 30m
+              timeout-action: fail
+      nested_failure_actions: |
+        on-failure:
+          errors: all
+          action:
+            retry:
+              attempts: 5
+              interval: 10s
+              failure-action:
+                manual-intervention:
+                  timeout: 60m
+                  timeout-action: fail
+
+  # ===========================================================================
+  # 9. RUNTIME CONFIGURATION
+  # ===========================================================================
+
+  - section: Runtime
+    rules:
+      - "Runtime can be a short string or a long form object."
+      - "Short form values: cloud, vm, kubernetes, shell."
+      - "VM runtime uses string (pool name) or { image: string } — there is NO 'pool' field."
+    examples:
+      short_cloud: |
+        runtime: cloud
+      long_cloud: |
+        runtime:
+          cloud:
+            image: ubuntu-latest
+            size: large
+      kubernetes: |
+        runtime:
+          kubernetes:
+            namespace: default
+            connector: my-k8s-connector
+      vm_short: |
+        runtime:
+          vm: my-pool-name
+      vm_long: |
+        runtime:
+          vm:
+            image: custom-image
+      shell: |
+        runtime:
+          shell: true
+    cloud_images: "ubuntu-latest, macos-latest, windows-latest"
+    cloud_sizes: "flex, small, medium, large, xlarge, xxlarge"
+
+  # ===========================================================================
+  # 10. CLONE CONFIGURATION
+  # ===========================================================================
+
+  - section: Clone
+    rules:
+      - "Clone can be set at pipeline level or stage level."
+      - "Short form: boolean (true/false). Long form: CloneLong object."
+    fields:
+      depth: "number — Clone depth."
+      disabled: "boolean — Disable cloning."
+      insecure: "boolean — Skip SSL verification."
+      lfs: "boolean — Enable LFS."
+      strategy: "'source-branch' | 'merge'"
+      submodules: "boolean — Clone submodules."
+      tags: "boolean — Clone tags."
+      trace: "boolean — Enable trace logging."
+      ref: "string | CloneRefLong — Clone reference."
+    examples:
+      disable: |
+        clone: false
+      shallow: |
+        clone:
+          depth: 50
+      with_ref: |
+        clone:
+          depth: 1
+          ref:
+            name: main
+            type: branch
+            sha: abc123
+      enable: |
+        clone: true
+
+  # ===========================================================================
+  # 11. CONTAINER CONFIGURATION
+  # ===========================================================================
+
+  - section: Container
+    rules:
+      - "Container can be a string (image name) or ContainerLong object."
+      - "String form: 'golang:1.20' — just the image."
+    fields:
+      image: "string — Container image."
+      connector: "string — Registry connector."
+      pull: "'always' | 'never' | 'if-not-exists'"
+      entrypoint: "string | string[]"
+      args: "string | string[]"
+      dns: "string | string[]"
+      env: "Record<string, string> — Container environment variables."
+      extra-hosts: "string | string[]"
+      network: "string"
+      network-mode: "string"
+      privileged: "boolean"
+      workdir: "string"
+      ports: "string[] — Port mappings."
+      volumes: "Mount[] — Volume mounts ({ source, target })."
+      user: "string | number"
+      group: "string | number"
+      cpu: "string | number"
+      memory: "string | number"
+      shm-size: "string | number"
+    example: |
+      container:
+        image: golang:1.20
+        pull: if-not-exists
+        privileged: false
+        memory: 2gb
+        cpu: 2
+        ports:
+        - "8080:8080"
+        volumes:
+        - source: docker-sock
+          target: /var/run/docker.sock
+
+  # ===========================================================================
+  # 12. CACHE CONFIGURATION (stage-level)
+  # ===========================================================================
+
+  - section: Cache
+    fields:
+      disabled: "boolean"
+      path: "string | string[] — Paths to cache."
+      key: "string — Cache key."
+      policy: "'pull' | 'push' | 'pull-push'"
+    examples:
+      basic: |
+        cache:
+          path: /go/pkg/mod
+          key: go-mod-${{ branch }}
+      multiple_paths: |
+        cache:
+          path:
+          - /go/pkg/mod
+          - /root/.cache/go-build
+      disabled: |
+        cache:
+          disabled: true
+
+  # ===========================================================================
+  # 13. VOLUMES (stage-level)
+  # ===========================================================================
+
+  - section: Volumes
+    rules:
+      - "Volumes are defined at stage level and referenced in container mounts."
+      - "Volume requires 'name' and 'uses' fields."
+      - "'uses' values: bind, claim, config, temp."
+      - "'with' provides type-specific config."
+    examples:
+      bind_volume: |
+        volumes:
+        - name: docker
+          uses: bind
+          with:
+            path: /var/run/docker.sock
+      temp_volume: |
+        volumes:
+        - name: cache
+          uses: temp
+          with:
+            medium: memory
+            limit: 256m
+      claim_volume: |
+        volumes:
+        - name: data
+          uses: claim
+          with:
+            name: my-pvc
+      referencing_in_container: |
+        volumes:
+        - name: docker
+          uses: bind
+          with:
+            path: /var/run/docker.sock
+        steps:
+        - run:
+            script: docker build .
+            container:
+              image: docker:latest
+              volumes:
+              - source: docker
+                target: /var/run/docker.sock
+
+  # ===========================================================================
+  # 14. ENVIRONMENT & SERVICE REFERENCES
+  # ===========================================================================
+
+  - section: Environment and Service References
+    rules:
+      - "Both can be set at pipeline level or stage level."
+      - "Short form: string. Long form: object with items and optional parallel flag."
+      - "ServiceRef also supports string[] for multiple services."
+    examples:
+      single_service: |
+        service: petstore
+      multiple_services: |
+        service:
+          items:
+          - petstore-frontend
+          - petstore-backend
+      single_environment: |
+        environment: prod
+      multi_environment: |
+        environment:
+          parallel: true
+          items:
+          - name: prod
+            deploy-to: all
+          - name: stage
+            deploy-to:
+            - infra1
+            - infra2
+
+  # ===========================================================================
+  # 15. TRIGGER EVENTS (on)
+  # ===========================================================================
+
+  - section: Trigger Events
+    rules:
+      - "'on' can be a string, Event object, or Event array."
+      - "Common event types: push, pull_request, schedule, workflow_dispatch."
+      - "Push and pull_request support branch/path/tag filters."
+    examples:
+      simple: |
+        on: push
+      multiple: |
+        on: [push, pull_request]
+      with_filters: |
+        on:
+        - push:
+            branches: [main, develop]
+            paths-ignore: ["docs/**"]
+        - pull_request:
+            branches: [main]
+            types: [opened, synchronize]
+
+  # ===========================================================================
+  # 16. TEMPLATE DEFINITIONS
+  # ===========================================================================
+
+  - section: Template Definitions
+    rules:
+      - "Templates are separate YAML documents at the root level (NOT inside pipeline:)."
+      - "A template defines inputs and either a 'step' or 'stage'."
+      - "For multi-step templates, wrap steps in a 'group' inside 'step'."
+    examples:
+      single_step_template: |
+        template:
+          inputs:
+            version:
+              type: string
+              default: latest
+          step:
+            run:
+              container: node:${{ inputs.version }}
+              script: npm test
+      multi_step_template: |
+        template:
+          inputs:
+            version:
+              type: string
+          step:
+            group:
+              steps:
+              - run:
+                  container: node:${{ inputs.version }}
+                  script: npm install
+              - run:
+                  container: node:${{ inputs.version }}
+                  script: npm test
+      stage_template: |
+        template:
+          inputs:
+            go_version:
+              type: string
+              default: "1.20"
+          stage:
+            steps:
+            - run:
+                script: go build
+                container: golang:${{ inputs.go_version }}
+            - run:
+                script: go test
+                container: golang:${{ inputs.go_version }}
+
+  # ===========================================================================
+  # 17. CONCURRENCY
+  # ===========================================================================
+
+  - section: Concurrency
+    rules:
+      - "Can be set at pipeline or stage level."
+      - "Short form: string (group name). Long form: { group, cancel-in-progress }."
+    examples:
+      simple: |
+        concurrency: deploy-group
+      with_cancel: |
+        concurrency:
+          group: deploy-${{ branch }}
+          cancel-in-progress: true
+
+  # ===========================================================================
+  # 18. PLATFORM
+  # ===========================================================================
+
+  - section: Platform
+    fields:
+      os: "'linux' | 'windows' | 'macos' | 'darwin' | string"
+      arch: "'amd64' | 'arm64' | string"
+      variant: "string — CPU variant (not commonly used)."
+      version: "string — OS version (not commonly used)."
+    example: |
+      platform:
+        os: linux
+        arch: amd64
+
+  # ===========================================================================
+  # 19. REPORT CONFIGURATION
+  # ===========================================================================
+
+  - section: Reports
+    rules:
+      - "Reports can be a single Report object or an array."
+      - "Used in run, run-test, and action steps."
+    fields:
+      type: "'junit' | 'xunit' | 'nunit'"
+      path: "string — Path to report file."
+    example: |
+      report:
+        type: junit
+        path: /path/to/report.xml
+
+  # ===========================================================================
+  # 20. ROLLBACK CONFIGURATION
+  # ===========================================================================
+
+  - section: Rollback
+    rules:
+      - "'rollback' is a stage-level field that defines rollback steps."
+      - "Schema type is Step (single step), but in practice a group step is used to bundle multiple rollback steps."
+      - "Rollback steps run when the stage fails and the failure action is 'stage-rollback'."
+      - "Rollback steps can reference rollback-specific variables via ${{rollback.data...}} and ${{rollback.infra...}}."
+    examples:
+      basic_rollback: |
+        - steps:
+          - name: Deploy
+            action:
+              uses: kubernetes-rolling-deploy
+          rollback:
+            - group:
+                steps:
+                - name: Rollback Deploy
+                  template:
+                    uses: k8sRollingRollbackStep@1.0.0
+          on-failure:
+            errors: all
+            action: stage-rollback
+      canary_with_rollback: |
+        - service: my_service
+          environment:
+            id: testenv
+            deploy-to: k8s_cluster
+          steps:
+          - name: Canary Deploy
+            id: canaryDeploy
+            template:
+              uses: k8sCanaryDeployStep@1.0.0
+          - name: Canary Delete
+            id: canaryDelete
+            template:
+              uses: k8sCanaryDeleteStep@1.0.0
+              with:
+                resources: <+exportedVariables.getValue("stage.canaryprepareactionoutput.PLUGIN_CANARY_WORKLOADS")>
+                is_openshift: <+exportedVariables.getValue("stage.canaryapplyactionoutput.HARNESS_IS_OPENSHIFT")>
+                flags:
+                - commandType: Delete
+                  flag: "--ignore-not-found"
+          - name: Rolling Deploy
+            id: rollingDeploy
+            template:
+              uses: k8sRollingDeployStep@1.0.0
+          rollback:
+            - group:
+                steps:
+                - name: Canary Rollback Delete
+                  id: canaryRollbackDelete
+                  template:
+                    uses: k8sCanaryDeleteStep@1.0.0
+                    with:
+                      select_delete_resources: resources
+                      resources: ${{rollback.data.PLUGIN_CANARY_WORKLOADS}}
+                      namespace: ${{rollback.infra.namespace}}
+                      is_openshift: ${{rollback.data.HARNESS_IS_OPENSHIFT}}
+                      flags:
+                      - commandType: Delete
+                        flag: "--ignore-not-found"
+                - name: Rolling Rollback
+                  id: rollingRollback
+                  template:
+                    uses: k8sRollingRollbackStep@1.0.0
+          on-failure:
+            errors: all
+            action: stage-rollback
+
+  # ===========================================================================
+  # 21. DEPLOYMENT PATTERNS
+  # ===========================================================================
+
+  - section: Kubernetes Deployment Patterns
+    rules:
+      - "Kubernetes deployments use action steps with well-known action names."
+      - "Common deployment sequence: manifest-download -> manifest-bake -> deploy action -> (optional approval) -> cleanup."
+      - "Rolling, canary, and blue-green are the three main deployment strategies."
+      - "Alternatively, template steps (uses: k8s*Step@version) can be used for type-safe deployment steps."
+    examples:
+      rolling_deployment: |
+        pipeline:
+          inputs:
+            skip_dry_run:
+              type: boolean
+              default: false
+          stages:
+          - service: petstore
+            environment: prod
+            steps:
+            - action:
+                uses: manifest-download
+            - action:
+                uses: manifest-bake
+            - action:
+                uses: kubernetes-rolling-deploy
+                with:
+                  dry-run: ${{ inputs.skip_dry_run }}
+      canary_deployment: |
+        pipeline:
+          stages:
+          - service: petstore
+            environment: prod
+            steps:
+            - action:
+                uses: manifest-download
+            - action:
+                uses: manifest-bake
+            - action:
+                uses: kubernetes-canary-deploy
+                with:
+                  count-type: percentage
+                  weight: 10
+                  dry-run: false
+            - approval:
+                uses: harness
+                with:
+                  timeout: 30m
+                  message: "Approve canary promotion?"
+                  groups: ["admins", "ops"]
+                  min-approvers: 1
+            - action:
+                uses: kubernetes-canary-delete
+                with:
+                  dry-run: false
+            - action:
+                uses: kubernetes-rolling-deploy
+                with:
+                  dry-run: false
+      blue_green_deployment: |
+        pipeline:
+          stages:
+          - service: petstore
+            environment: prod
+            steps:
+            - action:
+                uses: manifest-download
+            - action:
+                uses: manifest-bake
+            - action:
+                uses: kubernetes-blue-green-deploy
+                with:
+                  dry-run: false
+                  pruning: false
+            - action:
+                uses: kubernetes-blue-green-swap
+            - approval:
+                uses: harness
+                with:
+                  timeout: 30m
+                  message: "Approve blue-green promotion?"
+            - action:
+                uses: kubernetes-blue-green-scale-down
+
+  # ===========================================================================
+  # 22. ADDITIONAL EXPRESSION PATTERNS
+  # ===========================================================================
+
+  - section: Additional Expression Patterns
+    rules:
+      - "Two expression syntaxes coexist:"
+      - "  1. ${{ expr }} — Standard pipeline expressions for inputs, matrix, steps, stages, conditions."
+      - "  2. <+expr> — Harness platform expressions for secrets, infrastructure, exported variables, service/env names."
+      - "Rollback-specific expressions:"
+      - "  ${{rollback.data.KEY}}      — Data from the failed stage's exported variables"
+      - "  ${{rollback.infra.KEY}}     — Infrastructure context during rollback"
+      - "Harness platform expressions:"
+      - "  <+secrets.getValue('id')>   — Secret value reference"
+      - "  <+input>                     — Runtime input placeholder"
+      - "  <+infra.namespace>           — Infrastructure namespace"
+      - "  <+service.name>              — Service name"
+      - "  <+env.name>                  — Environment name"
+      - "  <+exportedVariables.getValue('stage.stepId.VAR')> — Exported variable from a step"
+      - "  <+terraform.output.KEY>      — Terraform output reference"
+    examples:
+      rollback_expressions: |
+        # In rollback steps, reference data from the failed execution
+        resources: ${{rollback.data.PLUGIN_CANARY_WORKLOADS}}
+        namespace: ${{rollback.infra.namespace}}
+      harness_expressions: |
+        # Secret references
+        password: <+secrets.getValue('db_password')>
+        # Exported variables from other steps
+        workloads: <+exportedVariables.getValue("stage.deployOutput.WORKLOADS")>
+        # Infrastructure references
+        namespace: <+infra.namespace>
+      dynamic_infrastructure: |
+        # Reference Terraform outputs
+        connector: <+terraform.output.connectorName>
+        namespace: <+terraform.output.namespace>
+
+  # ===========================================================================
+  # 23. ENVIRONMENT REFERENCE VARIANTS
+  # ===========================================================================
+
+  - section: Environment Reference Variants
+    rules:
+      - "EnvironmentRef has multiple forms. At stage level, it can also use 'id' + 'deploy-to' directly."
+      - "The EnvironmentItem type supports: name, deploy-to (and id in practice)."
+    examples:
+      string_form: |
+        environment: prod
+      stage_with_id_and_deploy_to: |
+        - service: my_service
+          environment:
+            id: testenv
+            deploy-to: k8s_cluster
+          steps:
+          - run: deploy.sh
+      multi_env_parallel: |
+        environment:
+          parallel: true
+          items:
+          - name: prod
+            deploy-to: all
+          - name: stage
+            deploy-to:
+            - infra1
+            - infra2
+
+  # ===========================================================================
+  # 24. REQUIRED FIELDS SUMMARY
+  # ===========================================================================
+
+  - section: Required Fields Summary
+    rules:
+      - "Pipeline: MUST have 'stages' array (1+ items)."
+      - "Input: 'type' is REQUIRED (string | number | boolean | array | duration | choice | environment | secret)."
+      - "Strategy: must specify exactly one of: matrix, for, or while. There is NO 'repeat'."
+      - "StepBarrier: 'name' is REQUIRED and must match a pipeline.barriers entry."
+      - "StepQueue: 'key' is REQUIRED. 'scope' is OPTIONAL."
+      - "Volume: 'name' and 'uses' are REQUIRED."
+      - "Mount (container volume): 'source' and 'target' are REQUIRED."
+      - "StepGroup / StepParallel: 'steps' array is REQUIRED."
+      - "StageGroup / StageParallel: 'stages' array is REQUIRED."
+
+  # ===========================================================================
+  # 21. COMMON MISTAKES TO AVOID
+  # ===========================================================================
+
+  - section: Common Mistakes to Avoid
+    rules:
+      - "Do NOT put stages at the YAML root level. Always wrap them: pipeline: { stages: [...] }"
+      - "Do NOT use a 'type' field to discriminate stages or steps. The type is inferred from which key is set."
+      - "Do NOT mix multiple step type keys in a single step object. A step has exactly one of: run, run-test, action, background, clone, barrier, queue, approval, template, group, parallel."
+      - "Do NOT use 'exports' on stages. The correct field name is 'outputs'."
+      - "Do NOT confuse pipeline-level 'on' (trigger events) with stage/step-level 'on-failure' (error handling)."
+      - "Do NOT use input types that don't exist (object, step, stage, connector). Valid: string, number, boolean, array, duration, choice, environment, secret."
+      - "Do NOT use 'repeat' as a strategy type. Only matrix, for, while exist."
+      - "Do NOT use 'wait' or 'policy' as step types. These are action steps: action: { uses: wait, with: {...} }."
+      - "Do NOT use 'pool' on VM runtime. Use the string form or { image: string }."
+      - "Do NOT use 'download' or 'output' as StepRun fields. They don't exist."
+      - "For multi-line scripts, use YAML block scalar '|' or '|-' or an array of strings."
+      - "For template references, use 'uses: name@version' format, NOT 'uses: name version'."
+
+  # ===========================================================================
+  # 22. FULL PIPELINE EXAMPLES
+  # ===========================================================================
+
+  - section: Full Pipeline Examples
+    examples:
+      ci_pipeline_with_parallel_steps: |
+        pipeline:
+          clone: true
+          stages:
+          - steps:
+            - parallel:
+                steps:
+                - name: Go build
+                  run:
+                    container: golang:1.25.3
+                    script: go build -o app .
+                - name: Go test with coverage
+                  run:
+                    container: golang:1.25.3
+                    script: |-
+                      go test -v -coverprofile=coverage.out ./...
+                - name: Secret leak check
+                  template:
+                    uses: gitleaksStep@1.0.0
+                    with:
+                      configuration: default
+                      detection: auto
+                      mode: orchestratedScan
+                      type: repository
+                - name: Docker build and push
+                  template:
+                    uses: buildAndPushToHAR@1.0.0
+                    with:
+                      connector: account.dockerhar
+                      repo: my-org/my-repo/my-image
+                      tags:
+                      - latest
+
+      matrix_test_pipeline: |
+        pipeline:
+          inputs:
+            skip_tests:
+              type: boolean
+              default: false
+          stages:
+          - name: test
+            if: ${{ inputs.skip_tests == false }}
+            strategy:
+              matrix:
+                go: ["1.19", "1.20", "1.21"]
+            steps:
+            - run:
+                script: go test ./...
+                container: golang:${{ matrix.go }}
+
+      multi_stage_with_outputs: |
+        pipeline:
+          stages:
+          - id: build
+            steps:
+            - id: build-step
+              run:
+                script: |
+                  go build -o app
+                  echo "version=1.0.0" >> $HARNESS_OUTPUT
+                container: golang:1.20
+            outputs:
+              app_version: ${{ steps.build-step.outputs.version }}
+          - id: deploy
+            if: ${{ branch == "main" }}
+            steps:
+            - run:
+                script: |
+                  echo "Deploying version ${{ stages.build.outputs.app_version }}"
+                  ./deploy.sh
+
+      deployment_pipeline: |
+        pipeline:
+          service: petstore
+          environment:
+            parallel: true
+            items:
+            - name: staging
+              deploy-to: all
+            - name: production
+              deploy-to: all
+          stages:
+          - name: deploy
+            steps:
+            - action:
+                uses: kubernetes-rolling-deploy
+                with:
+                  dry-run: false
+            on-failure:
+              errors: all
+              action:
+                retry:
+                  attempts: 3
+                  interval: [10s, 30s, 60s]
+                  failure-action: stage-rollback
+
+      pipeline_with_approval: |
+        pipeline:
+          stages:
+          - name: build
+            steps:
+            - run:
+                script: go build
+                container: golang
+          - name: approval-gate
+            approval:
+              uses: jira
+              with:
+                connector: account.jira
+                project: DEPLOY
+          - name: deploy
+            steps:
+            - action:
+                uses: kubernetes-rolling-deploy
+                with:
+                  dry-run: false
+
+      canary_deploy_with_rollback: |
+        pipeline:
+          stages:
+          - service: simple_k8s_svc
+            environment:
+              id: testenv
+              deploy-to: k8s_cluster_canary
+            steps:
+            - name: Kubernetes Canary Deploy Step
+              id: k8sCanaryDeployStep
+              template:
+                uses: k8sCanaryDeployStep@1.0.0
+            - name: K8s Canary Delete Step
+              id: k8sCanaryDeleteStep
+              template:
+                uses: k8sCanaryDeleteStep@1.0.0
+                with:
+                  resources: <+exportedVariables.getValue("stage.canaryprepareactionoutput.PLUGIN_CANARY_WORKLOADS")>
+                  is_openshift: <+exportedVariables.getValue("stage.canaryapplyactionoutput.HARNESS_IS_OPENSHIFT")>
+                  flags:
+                  - commandType: Delete
+                    flag: "--ignore-not-found"
+            - run:
+                shell: bash
+                script: |-
+                  # validate deployment
+                  exit 0
+            - name: Kubernetes Rolling Deploy Step
+              id: k8sRollingDeployStep
+              template:
+                uses: k8sRollingDeployStep@1.0.0
+            rollback:
+              - group:
+                  steps:
+                  - name: K8s Canary Rollback Delete Step
+                    id: k8sCanaryRollbackDeleteStep
+                    template:
+                      uses: k8sCanaryDeleteStep@1.0.0
+                      with:
+                        select_delete_resources: resources
+                        resources: ${{rollback.data.PLUGIN_CANARY_WORKLOADS}}
+                        namespace: ${{rollback.infra.namespace}}
+                        is_openshift: ${{rollback.data.HARNESS_IS_OPENSHIFT}}
+                        flags:
+                        - commandType: Delete
+                          flag: "--ignore-not-found"
+                  - name: Kubernetes Rolling Rollback Step
+                    id: k8sRollingRollbackStep
+                    template:
+                      uses: k8sRollingRollbackStep@1.0.0
+            on-failure:
+              errors: all
+              action: stage-rollback
+
+      ci_pipeline_with_parallel_and_templates: |
+        pipeline:
+          clone: true
+          stages:
+          - steps:
+            - parallel:
+                steps:
+                - name: Go build
+                  run:
+                    container: golang:1.25.3
+                    script: go build -o pastebin .
+                - name: Go test with coverage
+                  run:
+                    container: golang:1.25.3
+                    script: |-
+                      curl -fSsL -o /tmp/hcli https://storage.googleapis.com/harness-ti/hcli/v0.7/hcli-linux-amd64
+                      chmod 755 /tmp/hcli
+                      go install github.com/jstemmer/go-junit-report/v2@latest
+                      go test -v -coverprofile=coverage.out ./... 2>&1 | go-junit-report -set-exit-code > report.xml
+                      /tmp/hcli cov upload --file coverage.out --endpoint="$HARNESS_TI_SERVICE_ENDPOINT/coverage" --owner=org/default/project --identifier=go-example
+                      /tmp/hcli test-reports upload report.xml
+                - name: Secret leak check
+                  template:
+                    uses: gitleaksStep@1.0.0
+                    with:
+                      configuration: default
+                      detection: auto
+                      mode: orchestratedScan
+                      type: repository
+                - name: Docker build and push
+                  template:
+                    uses: buildAndPushToHAR@1.0.0
+                    with:
+                      connector: account.dockerhar
+                      repo: my-org/my-repo/go-example
+                      tags:
+                      - latest
