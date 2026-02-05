@@ -1,0 +1,319 @@
+# Multi-Environment Deployment Pipeline with Approvals and Rollbacks
+# Demonstrates: environments, services, approval gates, deployment strategies, rollback handling
+version: 1
+
+pipeline:
+  name: multi-environment-deployment
+
+  inputs:
+    service_name:
+      type: string
+      description: "Service to deploy"
+      required: true
+    image_tag:
+      type: string
+      description: "Docker image tag"
+      required: true
+    deploy_strategy:
+      type: choice
+      options: [rolling, canary, blue-green]
+      default: rolling
+    canary_percentage:
+      type: number
+      description: "Canary traffic percentage (only for canary strategy)"
+      default: 10
+
+  env:
+    REGISTRY: gcr.io/my-project
+
+  stages:
+    # Pre-deployment validation
+    - name: validation
+      steps:
+        - name: verify-image
+          run: |
+            echo "Verifying image exists: ${{ env.REGISTRY }}/${{ inputs.service_name }}:${{ inputs.image_tag }}"
+            docker manifest inspect ${{ env.REGISTRY }}/${{ inputs.service_name }}:${{ inputs.image_tag }}
+
+        - name: security-scan
+          run: |
+            trivy image --severity HIGH,CRITICAL \
+              ${{ env.REGISTRY }}/${{ inputs.service_name }}:${{ inputs.image_tag }}
+
+        - name: validate-k8s-manifests
+          run: |
+            kubeval --strict manifests/*.yaml
+            conftest test manifests/*.yaml
+
+    # Deploy to Development
+    - name: deploy-development
+      environment:
+        name: development
+        type: non-production
+
+      steps:
+        - name: deploy
+          uses: template/k8s-deploy@1.0.0
+          with:
+            namespace: development
+            image: ${{ env.REGISTRY }}/${{ inputs.service_name }}:${{ inputs.image_tag }}
+            replicas: 1
+
+        - name: smoke-test
+          run: ./scripts/smoke-test.sh development
+          timeout: 5m
+
+    # Deploy to QA with parallel infrastructure targets
+    - name: deploy-qa
+      environment:
+        name: qa
+        type: non-production
+        deploy-to: all
+
+      steps:
+        - name: deploy
+          uses: template/k8s-deploy@1.0.0
+          with:
+            namespace: qa
+            image: ${{ env.REGISTRY }}/${{ inputs.service_name }}:${{ inputs.image_tag }}
+            replicas: 2
+
+        - name: integration-tests
+          run: ./scripts/integration-tests.sh qa
+          timeout: 15m
+          report:
+            type: junit
+            path: test-results/integration.xml
+
+    # Deploy to Staging with approval
+    - name: deploy-staging
+      environment:
+        name: staging
+        type: non-production
+
+      approval:
+        uses: harness
+        with:
+          timeout: 4h
+          min-approvers: 1
+          groups: [qa-team]
+          message: "Approve deployment of ${{ inputs.service_name }}:${{ inputs.image_tag }} to staging"
+
+      on-failure:
+        errors: [all]
+        action:
+          stage-rollback: {}
+
+      steps:
+        - name: pre-deploy-snapshot
+          run: |
+            kubectl get deployment ${{ inputs.service_name }} -n staging -o yaml > rollback-snapshot.yaml
+
+        - name: deploy
+          id: deploy-staging
+          uses: template/k8s-deploy@1.0.0
+          with:
+            namespace: staging
+            image: ${{ env.REGISTRY }}/${{ inputs.service_name }}:${{ inputs.image_tag }}
+            replicas: 3
+            strategy: ${{ inputs.deploy_strategy }}
+
+        - name: e2e-tests
+          run: ./scripts/e2e-tests.sh staging
+          timeout: 30m
+
+        - name: performance-test
+          run: |
+            k6 run --out influxdb=http://metrics:8086/k6 \
+              -e TARGET_URL=https://staging.example.com \
+              scripts/load-test.js
+          timeout: 20m
+
+      rollback:
+        - name: restore-previous
+          run: kubectl apply -f rollback-snapshot.yaml
+        - name: verify-rollback
+          run: |
+            kubectl rollout status deployment/${{ inputs.service_name }} -n staging --timeout=5m
+
+    # Production deployment with strict approvals
+    - name: deploy-production
+      environment:
+        name: production
+        type: production
+
+      approval:
+        uses: jira
+        with:
+          project: DEPLOY
+          issue-type: Change Request
+          timeout: 72h
+          auto-approve:
+            if: ${{ inputs.deploy_strategy == "rolling" && build.source == "release/*" }}
+
+      concurrency:
+        group: production-${{ inputs.service_name }}
+        limit: 1
+
+      on-failure:
+        errors: [all]
+        action:
+          manual-intervention:
+            timeout: 1h
+            failure-action:
+              pipeline-rollback: {}
+
+      steps:
+        # Pre-deployment checks
+        - name: check-maintenance-window
+          run: ./scripts/check-maintenance-window.sh
+
+        - name: create-change-record
+          id: change-record
+          run: |
+            CHANGE_ID=$(./scripts/create-change-record.sh "${{ inputs.service_name }}" "${{ inputs.image_tag }}")
+            echo "change_id=$CHANGE_ID" >> $GITHUB_OUTPUT
+
+        # Strategy-based deployment
+        - group:
+            name: canary-deployment
+            if: ${{ inputs.deploy_strategy == "canary" }}
+            steps:
+              - name: deploy-canary
+                run: |
+                  kubectl apply -f manifests/canary.yaml
+                  kubectl set image deployment/${{ inputs.service_name }}-canary \
+                    app=${{ env.REGISTRY }}/${{ inputs.service_name }}:${{ inputs.image_tag }} \
+                    -n production
+
+              - name: configure-traffic-split
+                run: |
+                  kubectl patch virtualservice ${{ inputs.service_name }} \
+                    --type=merge \
+                    -p '{"spec":{"http":[{"route":[{"destination":{"host":"${{ inputs.service_name }}","subset":"stable"},"weight":${{ 100 - inputs.canary_percentage }}},{"destination":{"host":"${{ inputs.service_name }}","subset":"canary"},"weight":${{ inputs.canary_percentage }}}]}]}}'
+
+              - name: monitor-canary
+                run: ./scripts/monitor-canary.sh ${{ inputs.service_name }} 15m
+                timeout: 20m
+
+              - name: approval-promote-canary
+                uses: harness
+                with:
+                  timeout: 2h
+                  min-approvers: 2
+                  groups: [sre-team, product-team]
+                  message: "Canary metrics look good. Promote to full production?"
+
+              - name: promote-canary
+                run: |
+                  kubectl set image deployment/${{ inputs.service_name }} \
+                    app=${{ env.REGISTRY }}/${{ inputs.service_name }}:${{ inputs.image_tag }} \
+                    -n production
+                  kubectl rollout status deployment/${{ inputs.service_name }} -n production
+
+              - name: cleanup-canary
+                run: kubectl delete -f manifests/canary.yaml
+
+        - group:
+            name: blue-green-deployment
+            if: ${{ inputs.deploy_strategy == "blue-green" }}
+            steps:
+              - name: deploy-green
+                run: |
+                  kubectl apply -f manifests/green.yaml
+                  kubectl set image deployment/${{ inputs.service_name }}-green \
+                    app=${{ env.REGISTRY }}/${{ inputs.service_name }}:${{ inputs.image_tag }} \
+                    -n production
+                  kubectl rollout status deployment/${{ inputs.service_name }}-green -n production
+
+              - name: test-green
+                run: ./scripts/smoke-test.sh production-green
+
+              - name: switch-traffic
+                run: |
+                  kubectl patch service ${{ inputs.service_name }} \
+                    -p '{"spec":{"selector":{"version":"green"}}}' \
+                    -n production
+
+              - name: verify-switch
+                run: ./scripts/verify-traffic.sh ${{ inputs.service_name }} green
+
+              - name: cleanup-blue
+                run: kubectl delete deployment ${{ inputs.service_name }}-blue -n production --ignore-not-found
+
+        - group:
+            name: rolling-deployment
+            if: ${{ inputs.deploy_strategy == "rolling" }}
+            steps:
+              - name: rolling-update
+                run: |
+                  kubectl set image deployment/${{ inputs.service_name }} \
+                    app=${{ env.REGISTRY }}/${{ inputs.service_name }}:${{ inputs.image_tag }} \
+                    -n production
+                  kubectl rollout status deployment/${{ inputs.service_name }} -n production --timeout=10m
+
+        # Post-deployment verification
+        - name: health-check
+          run: ./scripts/health-check.sh production
+          timeout: 5m
+          on-failure:
+            errors: [all]
+            action:
+              retry:
+                attempts: 3
+                interval: [30s, 1m, 2m]
+                failure-action: fail
+
+        - name: close-change-record
+          run: ./scripts/close-change-record.sh ${{ steps.change-record.outputs.change_id }} success
+
+      rollback:
+        - name: rollback-deployment
+          run: kubectl rollout undo deployment/${{ inputs.service_name }} -n production
+
+        - name: verify-rollback
+          run: |
+            kubectl rollout status deployment/${{ inputs.service_name }} -n production --timeout=5m
+
+        - name: close-change-record-failed
+          run: ./scripts/close-change-record.sh ${{ steps.change-record.outputs.change_id }} failed
+
+        - name: notify-failure
+          uses: slackapi/slack-github-action@v1
+          with:
+            channel-id: incidents
+            payload: |
+              {
+                "text": ":rotating_light: Production deployment failed and rolled back",
+                "attachments": [{
+                  "color": "danger",
+                  "fields": [
+                    {"title": "Service", "value": "${{ inputs.service_name }}", "short": true},
+                    {"title": "Version", "value": "${{ inputs.image_tag }}", "short": true}
+                  ]
+                }]
+              }
+
+    # Post-deployment notifications
+    - name: notifications
+      steps:
+        - name: update-deployment-tracker
+          run: |
+            curl -X POST https://deployments.internal/api/record \
+              -H "Authorization: Bearer ${{ secrets.DEPLOY_API_TOKEN }}" \
+              -d '{
+                "service": "${{ inputs.service_name }}",
+                "version": "${{ inputs.image_tag }}",
+                "environment": "production",
+                "strategy": "${{ inputs.deploy_strategy }}",
+                "status": "success"
+              }'
+
+        - name: notify-slack
+          uses: slackapi/slack-github-action@v1
+          with:
+            channel-id: deployments
+            payload: |
+              {
+                "text": ":rocket: Successfully deployed ${{ inputs.service_name }}:${{ inputs.image_tag }} to production"
+              }

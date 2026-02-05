@@ -1,0 +1,337 @@
+# Input-Driven Pipeline with Validations
+# Demonstrates: all input types, validation patterns, conditional logic based on inputs, defaults
+version: 1
+
+pipeline:
+  name: configurable-deployment
+
+  inputs:
+    # String input with pattern validation
+    version:
+      type: string
+      description: "Semantic version to deploy (e.g., 1.2.3)"
+      required: true
+      pattern: "^\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9]+)?$"
+
+    # String with enum constraint
+    environment:
+      type: string
+      description: "Target deployment environment"
+      required: true
+      enum: [development, staging, production]
+      default: development
+
+    # Choice type (GitHub Actions compatible)
+    region:
+      type: choice
+      description: "Deployment region"
+      options:
+        - us-east-1
+        - us-west-2
+        - eu-west-1
+        - ap-southeast-1
+      default: us-east-1
+
+    # Number input with validation
+    replicas:
+      type: number
+      description: "Number of replicas to deploy"
+      default: 2
+
+    # Boolean inputs
+    enable_monitoring:
+      type: boolean
+      description: "Enable enhanced monitoring"
+      default: true
+
+    run_tests:
+      type: boolean
+      description: "Run test suite before deployment"
+      default: true
+
+    skip_approval:
+      type: boolean
+      description: "Skip approval gate (only for non-production)"
+      default: false
+
+    # Duration input
+    health_check_timeout:
+      type: duration
+      description: "Health check timeout duration"
+      default: 5m
+
+    deployment_timeout:
+      type: duration
+      description: "Overall deployment timeout"
+      default: 30m
+
+    # Array inputs
+    services:
+      type: array
+      description: "List of services to deploy"
+      default: ["api", "web", "worker"]
+
+    notify_channels:
+      type: array
+      description: "Slack channels for notifications"
+      default: ["deployments"]
+
+    feature_flags:
+      type: array
+      description: "Feature flags to enable"
+      default: []
+
+    # Secret input
+    deploy_token:
+      type: secret
+      description: "Deployment authentication token"
+      required: true
+
+    database_password:
+      type: secret
+      description: "Database password for migrations"
+
+  env:
+    DEPLOY_VERSION: ${{ inputs.version }}
+    DEPLOY_ENV: ${{ inputs.environment }}
+    DEPLOY_REGION: ${{ inputs.region }}
+
+  stages:
+    # Validation stage
+    - name: validate-inputs
+      steps:
+        - name: validate-version-format
+          run: |
+            VERSION="${{ inputs.version }}"
+            if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]; then
+              echo "Error: Invalid version format. Expected semver (e.g., 1.2.3 or 1.2.3-beta)"
+              exit 1
+            fi
+            echo "Version $VERSION is valid"
+
+        - name: validate-environment-constraints
+          run: |
+            ENV="${{ inputs.environment }}"
+            SKIP_APPROVAL="${{ inputs.skip_approval }}"
+
+            if [[ "$ENV" == "production" && "$SKIP_APPROVAL" == "true" ]]; then
+              echo "Error: Cannot skip approval for production deployments"
+              exit 1
+            fi
+
+            if [[ "$ENV" == "production" && ${{ inputs.replicas }} -lt 3 ]]; then
+              echo "Warning: Production should have at least 3 replicas"
+            fi
+
+        - name: validate-services
+          run: |
+            SERVICES='${{ join(inputs.services, ',') }}'
+            VALID_SERVICES="api,web,worker,scheduler,gateway"
+
+            IFS=',' read -ra SERVICE_ARRAY <<< "$SERVICES"
+            for service in "${SERVICE_ARRAY[@]}"; do
+              if [[ ! "$VALID_SERVICES" =~ "$service" ]]; then
+                echo "Error: Unknown service '$service'. Valid services: $VALID_SERVICES"
+                exit 1
+              fi
+            done
+            echo "All services are valid: $SERVICES"
+
+    # Conditional test stage
+    - name: run-tests
+      if: ${{ inputs.run_tests }}
+
+      steps:
+        - name: unit-tests
+          run: npm test
+          report:
+            type: junit
+            path: test-results/junit.xml
+
+        - name: integration-tests
+          if: ${{ inputs.environment != 'development' }}
+          run: npm run test:integration
+
+        - name: e2e-tests
+          if: ${{ inputs.environment == 'production' }}
+          run: npm run test:e2e
+
+    # Build stage with input-driven configuration
+    - name: build
+      steps:
+        - name: build-services
+          strategy:
+            matrix:
+              service: ${{ inputs.services }}
+
+          run: |
+            echo "Building ${{ matrix.service }} version ${{ inputs.version }}"
+            docker build \
+              --build-arg VERSION=${{ inputs.version }} \
+              --build-arg ENV=${{ inputs.environment }} \
+              -t myapp/${{ matrix.service }}:${{ inputs.version }} \
+              ./services/${{ matrix.service }}
+
+        - name: configure-feature-flags
+          if: ${{ length(inputs.feature_flags) > 0 }}
+          run: |
+            echo "Configuring feature flags: ${{ join(inputs.feature_flags, ', ') }}"
+            for flag in ${{ join(inputs.feature_flags, ' ') }}; do
+              echo "$flag=true" >> .env.flags
+            done
+
+    # Environment-specific deployment stages
+    - name: deploy-development
+      if: ${{ inputs.environment == 'development' }}
+
+      steps:
+        - name: deploy
+          run: |
+            ./scripts/deploy.sh \
+              --env development \
+              --region ${{ inputs.region }} \
+              --version ${{ inputs.version }} \
+              --replicas ${{ inputs.replicas }} \
+              --services "${{ join(inputs.services, ',') }}"
+          env:
+            DEPLOY_TOKEN: ${{ inputs.deploy_token }}
+          timeout: ${{ inputs.deployment_timeout }}
+
+    - name: deploy-staging
+      if: ${{ inputs.environment == 'staging' }}
+
+      approval:
+        if: ${{ !inputs.skip_approval }}
+        uses: harness
+        with:
+          timeout: 4h
+          min-approvers: 1
+          groups: [developers]
+
+      steps:
+        - name: deploy
+          run: |
+            ./scripts/deploy.sh \
+              --env staging \
+              --region ${{ inputs.region }} \
+              --version ${{ inputs.version }} \
+              --replicas ${{ inputs.replicas }} \
+              --services "${{ join(inputs.services, ',') }}" \
+              --monitoring ${{ inputs.enable_monitoring }}
+          env:
+            DEPLOY_TOKEN: ${{ inputs.deploy_token }}
+            DB_PASSWORD: ${{ inputs.database_password }}
+          timeout: ${{ inputs.deployment_timeout }}
+
+        - name: health-check
+          run: ./scripts/health-check.sh staging
+          timeout: ${{ inputs.health_check_timeout }}
+
+    - name: deploy-production
+      if: ${{ inputs.environment == 'production' }}
+
+      approval:
+        uses: harness
+        with:
+          timeout: 24h
+          min-approvers: 2
+          groups: [sre-team, product-owners]
+          message: |
+            Deploying version ${{ inputs.version }} to production
+            Region: ${{ inputs.region }}
+            Services: ${{ join(inputs.services, ', ') }}
+            Replicas: ${{ inputs.replicas }}
+
+      steps:
+        - name: pre-deployment-checks
+          run: |
+            echo "Running pre-deployment checks for production"
+            ./scripts/pre-deploy-checks.sh production
+
+        - name: deploy
+          run: |
+            ./scripts/deploy.sh \
+              --env production \
+              --region ${{ inputs.region }} \
+              --version ${{ inputs.version }} \
+              --replicas ${{ inputs.replicas }} \
+              --services "${{ join(inputs.services, ',') }}" \
+              --monitoring true \
+              --canary true
+          env:
+            DEPLOY_TOKEN: ${{ inputs.deploy_token }}
+            DB_PASSWORD: ${{ inputs.database_password }}
+          timeout: ${{ inputs.deployment_timeout }}
+
+        - name: health-check
+          run: ./scripts/health-check.sh production
+          timeout: ${{ inputs.health_check_timeout }}
+          on-failure:
+            errors: [all]
+            action:
+              retry:
+                attempts: 3
+                interval: 30s
+                failure-action:
+                  stage-rollback: {}
+
+        - name: smoke-tests
+          run: ./scripts/smoke-tests.sh production
+
+      rollback:
+        - run: ./scripts/rollback.sh production ${{ inputs.version }}
+
+    # Monitoring setup based on input
+    - name: setup-monitoring
+      if: ${{ inputs.enable_monitoring }}
+
+      steps:
+        - name: configure-alerts
+          run: |
+            ./scripts/configure-alerts.sh \
+              --env ${{ inputs.environment }} \
+              --version ${{ inputs.version }} \
+              --services "${{ join(inputs.services, ',') }}"
+
+        - name: setup-dashboards
+          run: |
+            ./scripts/setup-dashboards.sh \
+              --env ${{ inputs.environment }} \
+              --region ${{ inputs.region }}
+
+    # Notifications based on input channels
+    - name: notifications
+      steps:
+        - name: notify-slack
+          strategy:
+            matrix:
+              channel: ${{ inputs.notify_channels }}
+
+          run: |
+            curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+              -H "Content-Type: application/json" \
+              -d '{
+                "channel": "#${{ matrix.channel }}",
+                "text": "Deployed ${{ inputs.version }} to ${{ inputs.environment }} (${{ inputs.region }})",
+                "attachments": [{
+                  "color": "good",
+                  "fields": [
+                    {"title": "Services", "value": "${{ join(inputs.services, ', ') }}", "short": true},
+                    {"title": "Replicas", "value": "${{ inputs.replicas }}", "short": true}
+                  ]
+                }]
+              }'
+
+        - name: update-deployment-tracker
+          run: |
+            curl -X POST https://deployments.internal/api/record \
+              -H "Authorization: Bearer ${{ inputs.deploy_token }}" \
+              -d '{
+                "version": "${{ inputs.version }}",
+                "environment": "${{ inputs.environment }}",
+                "region": "${{ inputs.region }}",
+                "services": ${{ inputs.services }},
+                "replicas": ${{ inputs.replicas }},
+                "monitoring": ${{ inputs.enable_monitoring }},
+                "feature_flags": ${{ inputs.feature_flags }}
+              }'

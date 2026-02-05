@@ -1,0 +1,366 @@
+# Pipeline with Background Services for Integration Testing
+# Demonstrates: background containers, service dependencies, health checks, network configuration
+version: 1
+
+pipeline:
+  name: integration-test-with-services
+
+  inputs:
+    test_suite:
+      type: choice
+      options: [all, unit, integration, e2e]
+      default: all
+    debug_services:
+      type: boolean
+      description: "Keep services running for debugging"
+      default: false
+
+  env:
+    DATABASE_URL: postgres://testuser:testpass@localhost:5432/testdb
+    REDIS_URL: redis://localhost:6379
+    ELASTICSEARCH_URL: http://localhost:9200
+    KAFKA_BROKERS: localhost:9092
+    MINIO_ENDPOINT: localhost:9000
+
+  stages:
+    - name: integration-tests
+      runtime:
+        type: cloud
+        spec:
+          machine: large
+
+      volumes:
+        - temp:
+            name: postgres-data
+            path: /var/lib/postgresql/data
+        - temp:
+            name: redis-data
+            path: /data
+        - temp:
+            name: es-data
+            path: /usr/share/elasticsearch/data
+        - temp:
+            name: kafka-data
+            path: /var/lib/kafka/data
+        - temp:
+            name: minio-data
+            path: /data
+
+      steps:
+        # Start PostgreSQL
+        - name: postgres
+          background:
+            container:
+              image: postgres:15-alpine
+              env:
+                POSTGRES_USER: testuser
+                POSTGRES_PASSWORD: testpass
+                POSTGRES_DB: testdb
+                PGDATA: /var/lib/postgresql/data/pgdata
+              ports:
+                - 5432:5432
+              volumes:
+                - postgres-data:/var/lib/postgresql/data
+              memory: 512m
+              cpu: 0.5
+
+        # Start Redis
+        - name: redis
+          background:
+            container:
+              image: redis:7-alpine
+              args:
+                - --appendonly
+                - "yes"
+              ports:
+                - 6379:6379
+              volumes:
+                - redis-data:/data
+              memory: 256m
+
+        # Start Elasticsearch
+        - name: elasticsearch
+          background:
+            container:
+              image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+              env:
+                discovery.type: single-node
+                xpack.security.enabled: "false"
+                ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+              ports:
+                - 9200:9200
+                - 9300:9300
+              volumes:
+                - es-data:/usr/share/elasticsearch/data
+              memory: 1024m
+
+        # Start Kafka with Zookeeper
+        - name: zookeeper
+          background:
+            container:
+              image: confluentinc/cp-zookeeper:7.5.0
+              env:
+                ZOOKEEPER_CLIENT_PORT: "2181"
+                ZOOKEEPER_TICK_TIME: "2000"
+              ports:
+                - 2181:2181
+              memory: 256m
+
+        - name: kafka
+          background:
+            container:
+              image: confluentinc/cp-kafka:7.5.0
+              env:
+                KAFKA_BROKER_ID: "1"
+                KAFKA_ZOOKEEPER_CONNECT: localhost:2181
+                KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+                KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+                KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+              ports:
+                - 9092:9092
+              volumes:
+                - kafka-data:/var/lib/kafka/data
+              memory: 512m
+
+        # Start MinIO (S3-compatible storage)
+        - name: minio
+          background:
+            container:
+              image: minio/minio:latest
+              args:
+                - server
+                - /data
+                - --console-address
+                - ":9001"
+              env:
+                MINIO_ROOT_USER: minioadmin
+                MINIO_ROOT_PASSWORD: minioadmin
+              ports:
+                - 9000:9000
+                - 9001:9001
+              volumes:
+                - minio-data:/data
+              memory: 256m
+
+        # Start mock services
+        - name: mock-external-api
+          background:
+            container:
+              image: wiremock/wiremock:3.3.1
+              args:
+                - --verbose
+              ports:
+                - 8081:8080
+              volumes:
+                - bind:
+                    source: ./test/wiremock
+                    target: /home/wiremock
+
+        # Wait for all services to be healthy
+        - name: wait-for-services
+          run: |
+            echo "Waiting for PostgreSQL..."
+            timeout 60 bash -c 'until pg_isready -h localhost -p 5432 -U testuser; do sleep 1; done'
+
+            echo "Waiting for Redis..."
+            timeout 30 bash -c 'until redis-cli -h localhost ping | grep -q PONG; do sleep 1; done'
+
+            echo "Waiting for Elasticsearch..."
+            timeout 120 bash -c 'until curl -s http://localhost:9200/_cluster/health | grep -q "status"; do sleep 2; done'
+
+            echo "Waiting for Kafka..."
+            timeout 90 bash -c 'until nc -z localhost 9092; do sleep 2; done'
+
+            echo "Waiting for MinIO..."
+            timeout 30 bash -c 'until curl -s http://localhost:9000/minio/health/live; do sleep 1; done'
+
+            echo "All services are ready!"
+          timeout: 5m
+
+        # Initialize databases and services
+        - name: init-postgres
+          run: |
+            psql ${{ env.DATABASE_URL }} -f ./scripts/init-db.sql
+            psql ${{ env.DATABASE_URL }} -f ./scripts/seed-test-data.sql
+
+        - name: init-elasticsearch
+          run: |
+            curl -X PUT "localhost:9200/test-index" -H 'Content-Type: application/json' -d'
+            {
+              "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+              "mappings": {"properties": {"title": {"type": "text"}, "content": {"type": "text"}}}
+            }'
+
+        - name: init-minio
+          run: |
+            mc alias set local http://localhost:9000 minioadmin minioadmin
+            mc mb local/test-bucket
+            mc cp ./test/fixtures/sample-files/* local/test-bucket/
+
+        - name: init-kafka-topics
+          run: |
+            kafka-topics --create --bootstrap-server localhost:9092 --topic test-events --partitions 3
+            kafka-topics --create --bootstrap-server localhost:9092 --topic test-commands --partitions 1
+
+        # Run the actual tests
+        - name: run-unit-tests
+          if: ${{ inputs.test_suite == 'all' || inputs.test_suite == 'unit' }}
+          run: go test -v -race ./internal/...
+          report:
+            type: junit
+            path: test-results/unit.xml
+
+        - name: run-integration-tests
+          if: ${{ inputs.test_suite == 'all' || inputs.test_suite == 'integration' }}
+          run: |
+            go test -v -tags=integration ./tests/integration/...
+          env:
+            TEST_DATABASE_URL: ${{ env.DATABASE_URL }}
+            TEST_REDIS_URL: ${{ env.REDIS_URL }}
+            TEST_ELASTICSEARCH_URL: ${{ env.ELASTICSEARCH_URL }}
+            TEST_KAFKA_BROKERS: ${{ env.KAFKA_BROKERS }}
+            TEST_S3_ENDPOINT: ${{ env.MINIO_ENDPOINT }}
+            TEST_S3_ACCESS_KEY: minioadmin
+            TEST_S3_SECRET_KEY: minioadmin
+            MOCK_API_URL: http://localhost:8081
+          report:
+            type: junit
+            path: test-results/integration.xml
+
+        - name: run-e2e-tests
+          if: ${{ inputs.test_suite == 'all' || inputs.test_suite == 'e2e' }}
+          run: |
+            # Start the application
+            ./bin/app &
+            APP_PID=$!
+            sleep 5
+
+            # Run E2E tests
+            npm run test:e2e
+
+            # Cleanup
+            kill $APP_PID || true
+          container:
+            image: mcr.microsoft.com/playwright:v1.40.0
+            network-mode: host
+          report:
+            type: junit
+            path: test-results/e2e.xml
+
+        # Debug step - keeps services running
+        - name: debug-wait
+          if: ${{ inputs.debug_services && failure() }}
+          run: |
+            echo "Services are running for debugging. Press Ctrl+C to exit."
+            echo "PostgreSQL: localhost:5432"
+            echo "Redis: localhost:6379"
+            echo "Elasticsearch: localhost:9200"
+            echo "Kafka: localhost:9092"
+            echo "MinIO: localhost:9000 (console: localhost:9001)"
+            sleep 3600
+          timeout: 1h
+
+    # Contract testing stage with separate services
+    - name: contract-tests
+      if: ${{ inputs.test_suite == 'all' }}
+
+      steps:
+        - name: pact-broker
+          background:
+            container:
+              image: pactfoundation/pact-broker:latest
+              env:
+                PACT_BROKER_DATABASE_URL: sqlite:///tmp/pact_broker.sqlite3
+              ports:
+                - 9292:9292
+
+        - name: wait-for-pact-broker
+          run: |
+            timeout 30 bash -c 'until curl -s http://localhost:9292/; do sleep 1; done'
+
+        - name: run-consumer-tests
+          run: |
+            go test -v -tags=consumer ./tests/contract/consumer/...
+          env:
+            PACT_BROKER_URL: http://localhost:9292
+
+        - name: publish-pacts
+          run: |
+            pact-broker publish ./pacts \
+              --broker-base-url http://localhost:9292 \
+              --consumer-app-version ${{ build.number }}
+
+        - name: run-provider-tests
+          run: |
+            go test -v -tags=provider ./tests/contract/provider/...
+          env:
+            PACT_BROKER_URL: http://localhost:9292
+
+    # Performance testing with dedicated resources
+    - name: performance-tests
+      if: ${{ inputs.test_suite == 'all' && branch == 'main' }}
+
+      runtime:
+        type: cloud
+        spec:
+          machine: xlarge
+
+      steps:
+        - name: influxdb
+          background:
+            container:
+              image: influxdb:2.7
+              env:
+                DOCKER_INFLUXDB_INIT_MODE: setup
+                DOCKER_INFLUXDB_INIT_USERNAME: admin
+                DOCKER_INFLUXDB_INIT_PASSWORD: adminpass
+                DOCKER_INFLUXDB_INIT_ORG: test
+                DOCKER_INFLUXDB_INIT_BUCKET: k6
+              ports:
+                - 8086:8086
+
+        - name: grafana
+          background:
+            container:
+              image: grafana/grafana:10.2.0
+              env:
+                GF_AUTH_ANONYMOUS_ENABLED: "true"
+                GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+              ports:
+                - 3000:3000
+
+        - name: start-app-under-test
+          background:
+            script: |
+              ./bin/app serve --port 8080
+            container:
+              image: golang:1.21
+
+        - name: wait-for-app
+          run: |
+            timeout 30 bash -c 'until curl -s http://localhost:8080/health; do sleep 1; done'
+
+        - name: run-load-tests
+          run: |
+            k6 run \
+              --out influxdb=http://localhost:8086/k6 \
+              --vus 50 \
+              --duration 5m \
+              ./tests/performance/load-test.js
+          report:
+            type: custom
+            path: k6-results.json
+
+        - name: run-stress-tests
+          run: |
+            k6 run \
+              --out influxdb=http://localhost:8086/k6 \
+              --stages "1m:100,5m:100,1m:0" \
+              ./tests/performance/stress-test.js
+
+        - name: export-grafana-snapshot
+          run: |
+            curl -X POST http://localhost:3000/api/snapshots \
+              -H "Content-Type: application/json" \
+              -d '{"dashboard": {"title": "K6 Results"}}' \
+              > grafana-snapshot.json

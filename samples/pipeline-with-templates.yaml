@@ -1,0 +1,165 @@
+# Pipeline Using Reusable Templates
+# Demonstrates: template references, versioned templates, step templates, stage templates
+version: 1
+
+pipeline:
+  name: microservices-build-pipeline
+
+  inputs:
+    services:
+      type: array
+      description: "Services to build"
+      default: ["api", "worker", "frontend"]
+    environment:
+      type: choice
+      options: [dev, staging, prod]
+      default: dev
+
+  env:
+    REGISTRY: gcr.io/my-project
+
+  stages:
+    # Use a stage template for setup
+    - name: setup
+      uses: account.org/ci-setup-stage@2.0.0
+      with:
+        node_version: "20"
+        go_version: "1.21"
+        install_tools: true
+
+    # Build multiple services using step templates
+    - name: build-services
+      strategy:
+        matrix:
+          service: ${{ inputs.services }}
+
+      steps:
+        # Use versioned step template for Docker builds
+        - name: build-${{ matrix.service }}
+          uses: template/docker-build-push@1.0.0
+          with:
+            dockerfile: ./services/${{ matrix.service }}/Dockerfile
+            context: ./services/${{ matrix.service }}
+            image_name: my-project/${{ matrix.service }}
+            tags:
+              - ${{ build.number }}
+              - ${{ branch == 'main' && 'latest' || branch }}
+            registry: ${{ env.REGISTRY }}
+            platforms:
+              - linux/amd64
+              - linux/arm64
+            build_args:
+              - VERSION=${{ build.number }}
+              - BUILD_DATE=${{ timestamp }}
+            push: true
+            scan: true
+
+    # Run tests using test template
+    - name: test-services
+      strategy:
+        matrix:
+          service: ${{ inputs.services }}
+      parallel: true
+
+      steps:
+        - name: unit-tests-${{ matrix.service }}
+          uses: account.org/run-tests@1.5.0
+          with:
+            working_directory: ./services/${{ matrix.service }}
+            test_command: npm test
+            coverage_threshold: 80
+            report_format: junit
+
+        - name: integration-tests-${{ matrix.service }}
+          uses: account.org/integration-test@1.2.0
+          with:
+            service: ${{ matrix.service }}
+            config: ./test-configs/${{ matrix.service }}.yaml
+            timeout: 10m
+
+    # Security scanning using template
+    - name: security-scanning
+      steps:
+        - name: sast-scan
+          uses: account.org/security-scan@3.0.0
+          with:
+            scan_type: sast
+            target: .
+            fail_on: critical
+            report_path: security-reports/sast.sarif
+
+        - name: dependency-scan
+          uses: account.org/security-scan@3.0.0
+          with:
+            scan_type: sca
+            target: .
+            fail_on: high
+            report_path: security-reports/sca.sarif
+
+        - name: container-scan
+          uses: account.org/security-scan@3.0.0
+          with:
+            scan_type: container
+            images: ${{ inputs.services }}
+            registry: ${{ env.REGISTRY }}
+            tag: ${{ build.number }}
+
+    # Deploy using stage template
+    - name: deploy-dev
+      if: ${{ inputs.environment == 'dev' }}
+      uses: account.org/k8s-deploy-stage@2.1.0
+      with:
+        environment: development
+        namespace: dev
+        services: ${{ inputs.services }}
+        image_tag: ${{ build.number }}
+        registry: ${{ env.REGISTRY }}
+        replicas: 1
+        health_check_timeout: 5m
+
+    - name: deploy-staging
+      if: ${{ inputs.environment == 'staging' }}
+      uses: account.org/k8s-deploy-stage@2.1.0
+      with:
+        environment: staging
+        namespace: staging
+        services: ${{ inputs.services }}
+        image_tag: ${{ build.number }}
+        registry: ${{ env.REGISTRY }}
+        replicas: 2
+        health_check_timeout: 10m
+        approval_required: true
+        approval_groups: [qa-team]
+
+    - name: deploy-prod
+      if: ${{ inputs.environment == 'prod' }}
+      uses: account.org/k8s-deploy-stage@2.1.0
+      with:
+        environment: production
+        namespace: production
+        services: ${{ inputs.services }}
+        image_tag: ${{ build.number }}
+        registry: ${{ env.REGISTRY }}
+        replicas: 3
+        strategy: canary
+        canary_percentage: 10
+        health_check_timeout: 15m
+        approval_required: true
+        approval_groups: [sre-team, product-owners]
+        enable_rollback: true
+
+    # Notification using template
+    - name: notify
+      uses: account.org/notification-stage@1.0.0
+      with:
+        channels:
+          - type: slack
+            webhook: ${{ secrets.SLACK_WEBHOOK }}
+            channel: deployments
+          - type: email
+            recipients: ${{ inputs.environment == 'prod' && 'team@example.com,ops@example.com' || 'team@example.com' }}
+        message_template: deployment_complete
+        variables:
+          services: ${{ join(inputs.services, ', ') }}
+          environment: ${{ inputs.environment }}
+          version: ${{ build.number }}
