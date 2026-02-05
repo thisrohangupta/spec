@@ -1,0 +1,219 @@
+# Multi-Stage CI/CD Pipeline with Matrix Builds
+# Demonstrates: matrix strategy, parallel stages, caching, artifacts, and conditional execution
+version: 1
+
+pipeline:
+  name: multi-platform-ci-cd
+
+  inputs:
+    version:
+      type: string
+      description: "Version to build and deploy"
+      default: "1.0.0"
+    skip_tests:
+      type: boolean
+      description: "Skip test execution"
+      default: false
+    deploy_env:
+      type: choice
+      description: "Target deployment environment"
+      options: [staging, production]
+      default: staging
+
+  env:
+    GO_VERSION: "1.21"
+    NODE_VERSION: "20"
+
+  stages:
+    # Build stage with matrix strategy for multiple platforms
+    - name: build
+      strategy:
+        matrix:
+          os: [linux, darwin, windows]
+          arch: [amd64, arm64]
+          exclude:
+            - os: windows
+              arch: arm64
+        fail-fast: false
+        max-parallel: 4
+
+      cache:
+        - path: /go/pkg/mod
+          key: go-mod-${{ hashFiles('go.sum') }}
+        - path: node_modules
+          key: node-modules-${{ hashFiles('package-lock.json') }}
+
+      steps:
+        - name: checkout
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+
+        - name: setup-go
+          uses: actions/setup-go@v5
+          with:
+            go-version: ${{ env.GO_VERSION }}
+
+        - name: build-binary
+          run:
+            script: |
+              echo "Building for ${{ matrix.os }}/${{ matrix.arch }}"
+              GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -ldflags="-X main.Version=${{ inputs.version }}" -o bin/app-${{ matrix.os }}-${{ matrix.arch }} ./cmd/app
+            shell: bash
+          env:
+            CGO_ENABLED: "0"
+
+        - name: upload-artifact
+          uses: actions/upload-artifact@v4
+          with:
+            name: binary-${{ matrix.os }}-${{ matrix.arch }}
+            path: bin/
+            retention-days: 7
+
+    # Parallel test stages
+    - parallel:
+        - name: unit-tests
+          if: ${{ inputs.skip_tests != true }}
+          steps:
+            - name: run-unit-tests
+              run: go test -v -race -coverprofile=coverage.out ./...
+              report:
+                type: junit
+                path: reports/junit.xml
+
+        - name: lint
+          steps:
+            - name: golangci-lint
+              uses: golangci/golangci-lint-action@v4
+              with:
+                version: latest
+
+        - name: security-scan
+          steps:
+            - name: gosec
+              run: |
+                go install github.com/securego/gosec/v2/cmd/gosec@latest
+                gosec -fmt=json -out=security-report.json ./...
+
+    # Integration tests with service dependencies
+    - name: integration-tests
+      if: ${{ inputs.skip_tests != true && branch == "main" }}
+
+      runtime:
+        type: cloud
+        spec:
+          machine: large
+
+      steps:
+        - name: postgres
+          background:
+            container:
+              image: postgres:15
+              env:
+                POSTGRES_USER: test
+                POSTGRES_PASSWORD: test
+                POSTGRES_DB: testdb
+              ports:
+                - 5432:5432
+
+        - name: redis
+          background:
+            container:
+              image: redis:7-alpine
+              ports:
+                - 6379:6379
+
+        - name: wait-for-services
+          run: |
+            timeout 60 bash -c 'until pg_isready -h localhost -p 5432; do sleep 1; done'
+            timeout 60 bash -c 'until redis-cli -h localhost ping; do sleep 1; done'
+
+        - name: run-integration-tests
+          run: go test -v -tags=integration ./...
+          env:
+            DATABASE_URL: postgres://test:test@localhost:5432/testdb
+            REDIS_URL: redis://localhost:6379
+
+    # Deploy to staging
+    - name: deploy-staging
+      if: ${{ inputs.deploy_env == "staging" || branch == "main" }}
+      environment: staging
+
+      approval:
+        uses: harness
+        with:
+          timeout: 1h
+          min-approvers: 1
+          groups: [developers]
+
+      steps:
+        - name: download-artifacts
+          uses: actions/download-artifact@v4
+          with:
+            pattern: binary-linux-*
+            path: dist/
+
+        - name: deploy
+          run: |
+            echo "Deploying version ${{ inputs.version }} to staging"
+            ./scripts/deploy.sh staging
+          env:
+            DEPLOY_TOKEN: ${{ secrets.STAGING_DEPLOY_TOKEN }}
+
+      rollback:
+        - run: ./scripts/rollback.sh staging
+
+    # Deploy to production (conditional)
+    - name: deploy-production
+      if: ${{ inputs.deploy_env == "production" && branch == "main" }}
+      environment: production
+
+      approval:
+        uses: harness
+        with:
+          timeout: 24h
+          min-approvers: 2
+          groups: [senior-engineers, devops]
+
+      on-failure:
+        errors: [all]
+        action:
+          manual-intervention:
+            timeout: 30m
+            failure-action:
+              pipeline-rollback: {}
+
+      steps:
+        - name: health-check-pre
+          run: ./scripts/health-check.sh production
+
+        - name: deploy
+          run: |
+            echo "Deploying version ${{ inputs.version }} to production"
+            ./scripts/deploy.sh production
+          env:
+            DEPLOY_TOKEN: ${{ secrets.PROD_DEPLOY_TOKEN }}
+
+        - name: health-check-post
+          run: |
+            sleep 30
+            ./scripts/health-check.sh production
+
+        - name: notify
+          uses: slackapi/slack-github-action@v1
+          with:
+            channel-id: deployments
+            payload: |
+              {
+                "text": "Deployed ${{ inputs.version }} to production"
+              }
+
+      rollback:
+        - run: ./scripts/rollback.sh production
+        - uses: slackapi/slack-github-action@v1
+          with:
+            channel-id: deployments
+            payload: |
+              {
+                "text": "ROLLBACK: ${{ inputs.version }} in production"
+              }

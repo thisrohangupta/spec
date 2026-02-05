@@ -1,0 +1,388 @@
+# Complex Failure Handling Strategies Pipeline
+# Demonstrates: retry strategies, manual intervention, rollbacks, error types, failure actions
+version: 1
+
+pipeline:
+  name: resilient-deployment-pipeline
+
+  inputs:
+    auto_rollback:
+      type: boolean
+      description: "Automatically rollback on failure"
+      default: true
+    max_retries:
+      type: number
+      description: "Maximum retry attempts for flaky operations"
+      default: 3
+
+  env:
+    ENVIRONMENT: production
+    HEALTH_CHECK_URL: https://api.example.com/health
+
+  stages:
+    # Stage with comprehensive retry strategy
+    - name: external-api-integration
+      on-failure:
+        errors: [connectivity, timeout]
+        action:
+          retry:
+            attempts: 5
+            interval: [5s, 15s, 30s, 1m, 2m]
+            failure-action: fail
+
+      steps:
+        - name: fetch-configuration
+          run: |
+            curl -f --retry 3 --retry-delay 5 \
+              -H "Authorization: Bearer ${{ secrets.CONFIG_API_TOKEN }}" \
+              https://config.example.com/api/v1/config > config.json
+          timeout: 2m
+          on-failure:
+            errors: [timeout, connectivity]
+            action:
+              retry:
+                attempts: 3
+                interval: [10s, 30s, 1m]
+                failure-action:
+                  manual-intervention:
+                    timeout: 30m
+                    failure-action: fail
+
+        - name: sync-with-partner
+          run: ./scripts/sync-partner-api.sh
+          timeout: 5m
+          on-failure:
+            errors: [all]
+            action:
+              retry:
+                attempts: ${{ inputs.max_retries }}
+                interval: 30s
+                failure-action:
+                  ignore: {}
+
+    # Stage with authentication error handling
+    - name: secure-operations
+      on-failure:
+        errors: [authentication, authorization]
+        action:
+          manual-intervention:
+            timeout: 1h
+            failure-action:
+              abort: {}
+
+      steps:
+        - name: rotate-credentials
+          run: |
+            # Attempt to use existing credentials
+            if ! ./scripts/verify-credentials.sh; then
+              echo "Credentials invalid, requesting rotation"
+              exit 1
+            fi
+          on-failure:
+            errors: [authentication]
+            action:
+              retry:
+                attempts: 1
+                interval: 0s
+                failure-action:
+                  manual-intervention:
+                    timeout: 2h
+                    failure-action: fail
+
+        - name: access-secure-resource
+          run: ./scripts/access-vault.sh
+          on-failure:
+            errors: [authorization]
+            action:
+              manual-intervention:
+                timeout: 30m
+                failure-action:
+                  abort: {}
+
+    # Deployment stage with multiple failure strategies
+    - name: deploy-application
+      environment: production
+
+      on-failure:
+        errors: [all]
+        action:
+          manual-intervention:
+            timeout: 1h
+            failure-action:
+              stage-rollback: {}
+
+      steps:
+        - name: pre-deployment-backup
+          id: backup
+          run: |
+            BACKUP_ID=$(./scripts/create-backup.sh)
+            echo "backup_id=$BACKUP_ID" >> $GITHUB_OUTPUT
+          on-failure:
+            errors: [all]
+            action:
+              retry:
+                attempts: 2
+                interval: 1m
+                failure-action: fail
+
+        - name: deploy-database-migrations
+          run: ./scripts/run-migrations.sh
+          timeout: 10m
+          on-failure:
+            errors: [timeout]
+            action:
+              retry:
+                attempts: 2
+                interval: 2m
+                failure-action:
+                  manual-intervention:
+                    timeout: 30m
+                    failure-action:
+                      abort: {}
+            errors: [unknown]
+            action:
+              manual-intervention:
+                timeout: 1h
+                failure-action:
+                  stage-rollback: {}
+
+        - name: deploy-services
+          run: |
+            kubectl apply -f k8s/
+            kubectl rollout status deployment/app --timeout=5m
+          timeout: 10m
+          on-failure:
+            errors: [all]
+            action:
+              retry:
+                attempts: 2
+                interval: 30s
+                failure-action:
+                  manual-intervention:
+                    timeout: 30m
+                    failure-action:
+                      stage-rollback: {}
+
+        - name: verify-deployment
+          run: |
+            for i in {1..10}; do
+              if curl -sf ${{ env.HEALTH_CHECK_URL }}; then
+                echo "Health check passed"
+                exit 0
+              fi
+              sleep 10
+            done
+            echo "Health check failed after 10 attempts"
+            exit 1
+          timeout: 5m
+          on-failure:
+            errors: [all]
+            action:
+              retry:
+                attempts: 3
+                interval: 30s
+                failure-action:
+                  stage-rollback: {}
+
+      rollback:
+        - name: restore-database
+          run: ./scripts/restore-backup.sh ${{ steps.backup.outputs.backup_id }}
+          on-failure:
+            errors: [all]
+            action:
+              manual-intervention:
+                timeout: 2h
+                failure-action:
+                  abort: {}
+
+        - name: rollback-services
+          run: kubectl rollout undo deployment/app
+
+        - name: verify-rollback
+          run: |
+            kubectl rollout status deployment/app --timeout=5m
+            curl -sf ${{ env.HEALTH_CHECK_URL }}
+
+    # Stage demonstrating delegate provisioning failures
+    - name: infrastructure-operations
+      delegate: k8s-delegate
+
+      on-failure:
+        errors: [delegate-provisioning, delegate-restart]
+        action:
+          retry:
+            attempts: 3
+            interval: [1m, 2m, 5m]
+            failure-action:
+              manual-intervention:
+                timeout: 1h
+                failure-action:
+                  abort: {}
+
+      steps:
+        - name: provision-resources
+          run: terraform apply -auto-approve
+          timeout: 30m
+          on-failure:
+            errors: [timeout]
+            action:
+              manual-intervention:
+                timeout: 1h
+                failure-action:
+                  abort: {}
+
+    # Stage with approval rejection handling
+    - name: production-release
+      approval:
+        uses: harness
+        with:
+          timeout: 24h
+          min-approvers: 2
+          groups: [release-managers]
+
+      on-failure:
+        errors: [approval-rejection]
+        action:
+          manual-intervention:
+            timeout: 48h
+            failure-action:
+              abort: {}
+        errors: [input-timeout]
+        action:
+          retry:
+            attempts: 1
+            interval: 0s
+            failure-action:
+              abort: {}
+
+      steps:
+        - name: release
+          run: ./scripts/release.sh
+          on-failure:
+            errors: [all]
+            action:
+              pipeline-rollback: {}
+
+    # Stage with policy evaluation failures
+    - name: compliance-check
+      on-failure:
+        errors: [policy-evaluation]
+        action:
+          manual-intervention:
+            timeout: 4h
+            failure-action:
+              abort: {}
+
+      steps:
+        - name: run-compliance-scan
+          run: ./scripts/compliance-scan.sh
+          on-failure:
+            errors: [policy-evaluation]
+            action:
+              ignore: {}
+
+        - name: generate-compliance-report
+          run: ./scripts/generate-compliance-report.sh
+
+    # Parallel stage with independent failure handling
+    - parallel:
+        - name: notify-slack
+          on-failure:
+            errors: [all]
+            action:
+              ignore: {}
+          steps:
+            - run: |
+                curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+                  -d '{"text": "Deployment completed"}'
+
+        - name: notify-pagerduty
+          on-failure:
+            errors: [connectivity, timeout]
+            action:
+              retry:
+                attempts: 3
+                interval: 10s
+                failure-action:
+                  ignore: {}
+          steps:
+            - run: ./scripts/notify-pagerduty.sh success
+
+        - name: update-status-page
+          on-failure:
+            errors: [all]
+            action:
+              retry:
+                attempts: 2
+                interval: 5s
+                failure-action:
+                  ignore: {}
+          steps:
+            - run: ./scripts/update-status-page.sh operational
+
+    # Final stage with verification failure handling
+    - name: post-deployment-verification
+      on-failure:
+        errors: [verification]
+        action:
+          manual-intervention:
+            timeout: 2h
+            failure-action:
+              pipeline-rollback: {}
+        errors: [user-mark-fail]
+        action:
+          pipeline-rollback: {}
+
+      steps:
+        - name: smoke-tests
+          run: ./scripts/smoke-tests.sh
+          timeout: 15m
+          on-failure:
+            errors: [all]
+            action:
+              retry:
+                attempts: 2
+                interval: 1m
+                failure-action:
+                  manual-intervention:
+                    timeout: 30m
+                    failure-action:
+                      pipeline-rollback: {}
+
+        - name: synthetic-monitoring
+          run: ./scripts/synthetic-tests.sh
+          timeout: 10m
+
+        - name: canary-analysis
+          run: ./scripts/canary-analysis.sh
+          on-failure:
+            errors: [all]
+            action:
+              manual-intervention:
+                timeout: 1h
+                failure-action:
+                  pipeline-rollback: {}
+
+    # Cleanup stage that always runs
+    - name: cleanup
+      if: ${{ always() }}
+
+      on-failure:
+        errors: [all]
+        action:
+          ignore: {}
+
+      steps:
+        - name: cleanup-temp-resources
+          run: ./scripts/cleanup.sh
+          on-failure:
+            errors: [all]
+            action:
+              ignore: {}
+
+        - name: archive-logs
+          run: ./scripts/archive-logs.sh
+          on-failure:
+            errors: [all]
+            action:
+              ignore: {}

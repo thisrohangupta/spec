@@ -1,0 +1,396 @@
+# Monorepo Multi-Service Pipeline
+# Demonstrates: path-based triggers, selective builds, shared dependencies, workspace management
+version: 1
+
+pipeline:
+  name: monorepo-ci-cd
+
+  # Trigger configuration for monorepo
+  on:
+    push:
+      branches: [main, develop, "release/*"]
+    pull_request:
+      branches: [main]
+      types: [opened, synchronize, reopened]
+
+  inputs:
+    force_all:
+      type: boolean
+      description: "Force build all services regardless of changes"
+      default: false
+    target_services:
+      type: array
+      description: "Specific services to build (overrides change detection)"
+      default: []
+
+  env:
+    REGISTRY: gcr.io/myproject
+    MONOREPO_ROOT: /workspace
+
+  stages:
+    # Detect which services have changes
+    - name: detect-changes
+      outputs:
+        - changed_services
+        - changed_libs
+        - needs_shared_build
+
+      steps:
+        - name: checkout
+          uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
+
+        - name: detect-service-changes
+          id: changes
+          run: |
+            # Get the base commit for comparison
+            if [[ "${{ build.event }}" == "pull_request" ]]; then
+              BASE_SHA=$(git merge-base HEAD origin/${{ build.target_branch }})
+            else
+              BASE_SHA=${{ build.before }}
+            fi
+
+            # Detect changes in each service directory
+            CHANGED_SERVICES=""
+
+            for service in api web worker scheduler gateway admin; do
+              if git diff --name-only $BASE_SHA HEAD | grep -q "^services/$service/"; then
+                CHANGED_SERVICES="$CHANGED_SERVICES $service"
+              fi
+            done
+
+            # Detect changes in shared libraries
+            CHANGED_LIBS=""
+            NEEDS_SHARED_BUILD="false"
+
+            for lib in common auth database utils; do
+              if git diff --name-only $BASE_SHA HEAD | grep -q "^libs/$lib/"; then
+                CHANGED_LIBS="$CHANGED_LIBS $lib"
+                NEEDS_SHARED_BUILD="true"
+              fi
+            done
+
+            # Check for root config changes that affect all
+            if git diff --name-only $BASE_SHA HEAD | grep -qE "^(package.json|pnpm-lock.yaml|tsconfig.json|.eslintrc)"; then
+              NEEDS_SHARED_BUILD="true"
+            fi
+
+            # Output results
+            echo "changed_services=${CHANGED_SERVICES# }" >> $GITHUB_OUTPUT
+            echo "changed_libs=${CHANGED_LIBS# }" >> $GITHUB_OUTPUT
+            echo "needs_shared_build=$NEEDS_SHARED_BUILD" >> $GITHUB_OUTPUT
+
+            echo "Changed services: $CHANGED_SERVICES"
+            echo "Changed libs: $CHANGED_LIBS"
+            echo "Needs shared build: $NEEDS_SHARED_BUILD"
+
+    # Build shared libraries first if needed
+    - name: build-shared
+      if: ${{ stages.detect-changes.outputs.needs_shared_build == 'true' || inputs.force_all }}
+
+      cache:
+        - path: node_modules
+          key: monorepo-deps-${{ hashFiles('pnpm-lock.yaml') }}
+        - path: libs/**/dist
+          key: libs-${{ hashFiles('libs/**/*.ts') }}
+
+      steps:
+        - name: install-dependencies
+          run: pnpm install --frozen-lockfile
+
+        - name: build-common
+          run: pnpm --filter @myorg/common build
+
+        - name: build-auth
+          run: pnpm --filter @myorg/auth build
+
+        - name: build-database
+          run: pnpm --filter @myorg/database build
+
+        - name: build-utils
+          run: pnpm --filter @myorg/utils build
+
+    # Parallel service builds
+    - name: build-services
+      parallel: true
+
+      steps:
+        # API Service
+        - group:
+            name: api-service
+            if: ${{ contains(stages.detect-changes.outputs.changed_services, 'api') || stages.detect-changes.outputs.needs_shared_build == 'true' || inputs.force_all || contains(inputs.target_services, 'api') }}
+
+            steps:
+              - name: build-api
+                run: pnpm --filter @myorg/api build
+
+              - name: test-api
+                run: pnpm --filter @myorg/api test
+                report:
+                  type: junit
+                  path: services/api/test-results/junit.xml
+
+              - name: lint-api
+                run: pnpm --filter @myorg/api lint
+
+              - name: docker-build-api
+                run: |
+                  docker build \
+                    -f services/api/Dockerfile \
+                    -t ${{ env.REGISTRY }}/api:${{ build.number }} \
+                    --build-arg VERSION=${{ build.number }} \
+                    .
+
+        # Web Service
+        - group:
+            name: web-service
+            if: ${{ contains(stages.detect-changes.outputs.changed_services, 'web') || stages.detect-changes.outputs.needs_shared_build == 'true' || inputs.force_all || contains(inputs.target_services, 'web') }}
+
+            steps:
+              - name: build-web
+                run: pnpm --filter @myorg/web build
+                env:
+                  NEXT_PUBLIC_API_URL: ${{ build.event == 'pull_request' && 'https://preview.example.com' || 'https://api.example.com' }}
+
+              - name: test-web
+                run: pnpm --filter @myorg/web test
+                report:
+                  type: junit
+                  path: services/web/test-results/junit.xml
+
+              - name: docker-build-web
+                run: |
+                  docker build \
+                    -f services/web/Dockerfile \
+                    -t ${{ env.REGISTRY }}/web:${{ build.number }} \
+                    .
+
+        # Worker Service
+        - group:
+            name: worker-service
+            if: ${{ contains(stages.detect-changes.outputs.changed_services, 'worker') || stages.detect-changes.outputs.needs_shared_build == 'true' || inputs.force_all || contains(inputs.target_services, 'worker') }}
+
+            steps:
+              - name: build-worker
+                run: pnpm --filter @myorg/worker build
+
+              - name: test-worker
+                run: pnpm --filter @myorg/worker test
+
+              - name: docker-build-worker
+                run: |
+                  docker build \
+                    -f services/worker/Dockerfile \
+                    -t ${{ env.REGISTRY }}/worker:${{ build.number }} \
+                    .
+
+        # Scheduler Service
+        - group:
+            name: scheduler-service
+            if: ${{ contains(stages.detect-changes.outputs.changed_services, 'scheduler') || stages.detect-changes.outputs.needs_shared_build == 'true' || inputs.force_all || contains(inputs.target_services, 'scheduler') }}
+
+            steps:
+              - name: build-scheduler
+                run: pnpm --filter @myorg/scheduler build
+
+              - name: test-scheduler
+                run: pnpm --filter @myorg/scheduler test
+
+              - name: docker-build-scheduler
+                run: |
+                  docker build \
+                    -f services/scheduler/Dockerfile \
+                    -t ${{ env.REGISTRY }}/scheduler:${{ build.number }} \
+                    .
+
+        # Gateway Service
+        - group:
+            name: gateway-service
+            if: ${{ contains(stages.detect-changes.outputs.changed_services, 'gateway') || stages.detect-changes.outputs.needs_shared_build == 'true' || inputs.force_all || contains(inputs.target_services, 'gateway') }}
+
+            steps:
+              - name: build-gateway
+                run: pnpm --filter @myorg/gateway build
+
+              - name: test-gateway
+                run: pnpm --filter @myorg/gateway test
+
+              - name: docker-build-gateway
+                run: |
+                  docker build \
+                    -f services/gateway/Dockerfile \
+                    -t ${{ env.REGISTRY }}/gateway:${{ build.number }} \
+                    .
+
+    # Cross-service integration tests
+    - name: integration-tests
+      if: ${{ branch == 'main' || branch == 'develop' || inputs.force_all }}
+
+      runtime:
+        type: cloud
+        spec:
+          machine: large
+
+      steps:
+        # Start all services for integration testing
+        - name: start-dependencies
+          background:
+            script: docker-compose -f docker-compose.test.yaml up
+
+        - name: wait-for-services
+          run: ./scripts/wait-for-services.sh
+
+        - name: run-integration-tests
+          run: pnpm test:integration
+          report:
+            type: junit
+            path: test-results/integration.xml
+
+        - name: run-e2e-tests
+          run: pnpm test:e2e
+          container:
+            image: mcr.microsoft.com/playwright:v1.40.0
+            network-mode: host
+
+    # Push images to registry
+    - name: push-images
+      if: ${{ branch == 'main' || branch == 'develop' || startsWith(branch, 'release/') }}
+
+      steps:
+        - name: login-to-registry
+          run: |
+            echo "${{ secrets.GCR_KEY }}" | docker login -u _json_key --password-stdin gcr.io
+
+        - name: push-changed-images
+          run: |
+            CHANGED="${{ stages.detect-changes.outputs.changed_services }}"
+            NEEDS_SHARED="${{ stages.detect-changes.outputs.needs_shared_build }}"
+            FORCE="${{ inputs.force_all }}"
+
+            push_if_built() {
+              local service=$1
+              if [[ "$FORCE" == "true" ]] || [[ "$NEEDS_SHARED" == "true" ]] || [[ "$CHANGED" == *"$service"* ]]; then
+                echo "Pushing $service..."
+                docker push ${{ env.REGISTRY }}/$service:${{ build.number }}
+
+                if [[ "${{ branch }}" == "main" ]]; then
+                  docker tag ${{ env.REGISTRY }}/$service:${{ build.number }} ${{ env.REGISTRY }}/$service:latest
+                  docker push ${{ env.REGISTRY }}/$service:latest
+                fi
+              fi
+            }
+
+            push_if_built api
+            push_if_built web
+            push_if_built worker
+            push_if_built scheduler
+            push_if_built gateway
+
+    # Deploy to preview environment for PRs
+    - name: deploy-preview
+      if: ${{ build.event == 'pull_request' }}
+      environment:
+        name: preview-pr-${{ build.pr_number }}
+        type: non-production
+
+      steps:
+        - name: deploy-preview-environment
+          run: |
+            ./scripts/deploy-preview.sh \
+              --pr ${{ build.pr_number }} \
+              --services "${{ stages.detect-changes.outputs.changed_services }}" \
+              --version ${{ build.number }}
+
+        - name: comment-preview-url
+          uses: actions/github-script@v7
+          with:
+            script: |
+              github.rest.issues.createComment({
+                issue_number: ${{ build.pr_number }},
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: '🚀 Preview deployed: https://pr-${{ build.pr_number }}.preview.example.com'
+              })
+
+    # Deploy to staging
+    - name: deploy-staging
+      if: ${{ branch == 'develop' }}
+      environment:
+        name: staging
+        type: non-production
+
+      steps:
+        - name: deploy-changed-services
+          run: |
+            ./scripts/deploy.sh staging \
+              --services "${{ stages.detect-changes.outputs.changed_services }}" \
+              --version ${{ build.number }}
+
+    # Deploy to production
+    - name: deploy-production
+      if: ${{ branch == 'main' }}
+      environment:
+        name: production
+        type: production
+
+      approval:
+        uses: harness
+        with:
+          timeout: 24h
+          min-approvers: 2
+          groups: [platform-team, service-owners]
+          message: |
+            Production deployment for build ${{ build.number }}
+            Changed services: ${{ stages.detect-changes.outputs.changed_services }}
+            Changed libs: ${{ stages.detect-changes.outputs.changed_libs }}
+
+      steps:
+        - name: deploy-production
+          run: |
+            ./scripts/deploy.sh production \
+              --services "${{ stages.detect-changes.outputs.changed_services }}" \
+              --version ${{ build.number }} \
+              --canary true
+
+        - name: verify-deployment
+          run: ./scripts/verify-deployment.sh production
+
+      rollback:
+        - name: rollback-services
+          run: |
+            ./scripts/rollback.sh production \
+              --services "${{ stages.detect-changes.outputs.changed_services }}"
+
+    # Cleanup preview environments for merged PRs
+    - name: cleanup-preview
+      if: ${{ build.event == 'pull_request' && build.action == 'closed' }}
+
+      steps:
+        - name: delete-preview-environment
+          run: ./scripts/cleanup-preview.sh --pr ${{ build.pr_number }}
+
+    # Notify on completion
+    - name: notify
+      if: ${{ branch == 'main' || branch == 'develop' }}
+
+      steps:
+        - name: slack-notification
+          run: |
+            STATUS="${{ status }}"
+            COLOR=$([[ "$STATUS" == "success" ]] && echo "good" || echo "danger")
+
+            curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+              -H "Content-Type: application/json" \
+              -d '{
+                "attachments": [{
+                  "color": "'"$COLOR"'",
+                  "title": "Monorepo Build '"$STATUS"'",
+                  "fields": [
+                    {"title": "Branch", "value": "${{ branch }}", "short": true},
+                    {"title": "Build", "value": "${{ build.number }}", "short": true},
+                    {"title": "Changed Services", "value": "${{ stages.detect-changes.outputs.changed_services || 'None' }}", "short": false},
+                    {"title": "Changed Libs", "value": "${{ stages.detect-changes.outputs.changed_libs || 'None' }}", "short": false}
+                  ]
+                }]
+              }'

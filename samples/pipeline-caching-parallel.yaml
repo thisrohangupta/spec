@@ -1,0 +1,271 @@
+# Advanced Caching and Parallel Execution Pipeline
+# Demonstrates: multi-layer caching, parallel stages, parallel steps, cache policies, workspace sharing
+version: 1
+
+pipeline:
+  name: optimized-build-pipeline
+
+  inputs:
+    skip_cache:
+      type: boolean
+      description: "Skip cache for fresh build"
+      default: false
+
+  env:
+    PNPM_HOME: /root/.local/share/pnpm
+    GOPATH: /go
+    GOCACHE: /go-cache
+
+  stages:
+    # Parallel dependency installation with caching
+    - parallel:
+        # Node.js dependencies
+        - name: install-node-deps
+          cache:
+            - path: node_modules
+              key: node-${{ hashFiles('pnpm-lock.yaml') }}
+              policy: pull-push
+            - path: ${{ env.PNPM_HOME }}
+              key: pnpm-store-${{ hashFiles('pnpm-lock.yaml') }}
+              policy: pull-push
+            - path: .next/cache
+              key: nextjs-${{ hashFiles('pnpm-lock.yaml') }}-${{ hashFiles('src/**/*.ts', 'src/**/*.tsx') }}
+              policy: pull-push
+
+          steps:
+            - name: install-pnpm
+              run: |
+                npm install -g pnpm@8
+                pnpm config set store-dir ${{ env.PNPM_HOME }}/store
+
+            - name: install-deps
+              run: pnpm install --frozen-lockfile
+
+        # Go dependencies
+        - name: install-go-deps
+          cache:
+            - path: ${{ env.GOPATH }}/pkg/mod
+              key: go-mod-${{ hashFiles('go.sum') }}
+              policy: pull-push
+            - path: ${{ env.GOCACHE }}
+              key: go-build-${{ hashFiles('**/*.go') }}
+              policy: pull-push
+
+          steps:
+            - name: download-go-modules
+              run: go mod download -x
+
+        # Python dependencies
+        - name: install-python-deps
+          cache:
+            - path: ~/.cache/pip
+              key: pip-${{ hashFiles('requirements.txt', 'requirements-dev.txt') }}
+              policy: pull-push
+            - path: .venv
+              key: venv-${{ hashFiles('requirements.txt', 'requirements-dev.txt') }}
+              policy: pull-push
+
+          steps:
+            - name: setup-venv
+              run: |
+                python -m venv .venv
+                source .venv/bin/activate
+                pip install --upgrade pip
+                pip install -r requirements.txt -r requirements-dev.txt
+
+    # Parallel build stage
+    - name: build
+      steps:
+        # Build all components in parallel
+        - parallel:
+            - name: build-frontend
+              run: |
+                pnpm run build:frontend
+              env:
+                NODE_ENV: production
+                NEXT_TELEMETRY_DISABLED: "1"
+
+            - name: build-backend-api
+              run: |
+                CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/api ./cmd/api
+
+            - name: build-backend-worker
+              run: |
+                CGO_ENABLED=0 go build -ldflags="-w -s" -o bin/worker ./cmd/worker
+
+            - name: build-python-package
+              run: |
+                source .venv/bin/activate
+                python -m build
+
+    # Parallel test execution with different test types
+    - name: test
+      steps:
+        - parallel:
+            # Frontend tests
+            - group:
+                name: frontend-tests
+                steps:
+                  - parallel:
+                      - name: unit-tests-frontend
+                        run: pnpm test:unit --coverage
+                        report:
+                          type: junit
+                          path: coverage/junit.xml
+
+                      - name: component-tests
+                        run: pnpm test:components
+                        container:
+                          image: mcr.microsoft.com/playwright:v1.40.0
+
+            # Backend tests with parallel shards
+            - group:
+                name: backend-tests
+                strategy:
+                  matrix:
+                    shard: [1, 2, 3, 4]
+                  max-parallel: 4
+                steps:
+                  - name: go-tests-shard-${{ matrix.shard }}
+                    run: |
+                      go test -v -race -coverprofile=coverage-${{ matrix.shard }}.out \
+                        $(go list ./... | awk "NR % 4 == ${{ matrix.shard }} - 1")
+                    report:
+                      type: junit
+                      path: test-results/shard-${{ matrix.shard }}.xml
+
+            # Python tests
+            - group:
+                name: python-tests
+                steps:
+                  - name: pytest
+                    run: |
+                      source .venv/bin/activate
+                      pytest -n auto --dist loadfile \
+                        --cov=src --cov-report=xml \
+                        --junitxml=test-results/pytest.xml
+
+    # Parallel linting and static analysis
+    - name: quality-checks
+      steps:
+        - parallel:
+            - name: eslint
+              run: pnpm lint
+              on-failure:
+                errors: [all]
+                action:
+                  ignore: {}
+
+            - name: golangci-lint
+              run: golangci-lint run --timeout 5m
+              on-failure:
+                errors: [all]
+                action:
+                  ignore: {}
+
+            - name: ruff
+              run: |
+                source .venv/bin/activate
+                ruff check .
+
+            - name: type-check-frontend
+              run: pnpm typecheck
+
+            - name: type-check-python
+              run: |
+                source .venv/bin/activate
+                mypy src/
+
+    # Parallel Docker builds with layer caching
+    - name: docker-builds
+      runtime:
+        type: cloud
+        spec:
+          machine: large
+
+      cache:
+        - path: /var/lib/docker
+          key: docker-layers-${{ hashFiles('**/Dockerfile') }}
+          policy: pull-push
+
+      steps:
+        - parallel:
+            - name: build-api-image
+              run: |
+                docker build \
+                  --cache-from type=local,src=/var/lib/docker/buildcache/api \
+                  --cache-to type=local,dest=/var/lib/docker/buildcache/api,mode=max \
+                  -t myapp/api:${{ build.number }} \
+                  -f docker/api.Dockerfile .
+
+            - name: build-worker-image
+              run: |
+                docker build \
+                  --cache-from type=local,src=/var/lib/docker/buildcache/worker \
+                  --cache-to type=local,dest=/var/lib/docker/buildcache/worker,mode=max \
+                  -t myapp/worker:${{ build.number }} \
+                  -f docker/worker.Dockerfile .
+
+            - name: build-frontend-image
+              run: |
+                docker build \
+                  --cache-from type=local,src=/var/lib/docker/buildcache/frontend \
+                  --cache-to type=local,dest=/var/lib/docker/buildcache/frontend,mode=max \
+                  -t myapp/frontend:${{ build.number }} \
+                  -f docker/frontend.Dockerfile .
+
+    # Parallel integration tests with shared workspace
+    - name: integration-tests
+      workspace:
+        path: /workspace/integration
+
+      volumes:
+        - bind:
+            source: /var/run/docker.sock
+            target: /var/run/docker.sock
+
+      steps:
+        - name: start-services
+          run: docker-compose -f docker-compose.test.yaml up -d
+
+        - parallel:
+            - name: api-integration-tests
+              run: |
+                go test -v -tags=integration ./tests/integration/api/...
+              env:
+                API_URL: http://localhost:8080
+
+            - name: e2e-tests
+              run: pnpm test:e2e
+              container:
+                image: mcr.microsoft.com/playwright:v1.40.0
+                network-mode: host
+
+            - name: python-integration
+              run: |
+                source .venv/bin/activate
+                pytest tests/integration/ -v
+
+        - name: stop-services
+          run: docker-compose -f docker-compose.test.yaml down -v
+          if: ${{ always() }}
+
+    # Merge coverage reports
+    - name: coverage-report
+      cache:
+        - path: coverage-merged
+          key: coverage-${{ build.number }}
+          policy: push
+
+      steps:
+        - name: merge-go-coverage
+          run: |
+            gocovmerge coverage-*.out > coverage-merged/go-coverage.out
+            go tool cover -html=coverage-merged/go-coverage.out -o coverage-merged/go-coverage.html
+
+        - name: upload-coverage
+          uses: codecov/codecov-action@v4
+          with:
+            files: coverage-merged/*.out,coverage/*.xml
+            flags: unittests
+            fail_ci_if_error: false
