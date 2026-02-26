@@ -1,0 +1,64 @@
+# Code Review Agent - Triggered by PR Events
+# Automatically reviews PRs and responds to @mentions
+
+version: 1
+agent:
+  on:
+    - pull_request:
+        types:
+          - opened
+          - synchronize
+    - comment_mention:
+        agents:
+          - codereview
+  tools:
+    atlassian:
+      type: connector
+      oneof:
+        - atlassian
+      read: true
+      write: true
+  clone:
+    depth: 1000
+    ref:
+      type: pull-request
+      number: <+trigger.pullReq>
+    repo: <+trigger.repo>
+  stages:
+    - name: codereview
+      steps:
+        - name: ai_reviewer
+          agent:
+            uses: harness/codereview-agent:1.0.0
+            with:
+              output_file: /harness/task.txt
+              review_output_file: /harness/review.json
+              working_directory: /harness
+            tools:
+              - grep
+              - read
+              - write
+              - mcp
+            mcp_auth: ${{ tools.atlassian }}
+            max_turns: 25
+        - name: post_comments
+          run:
+            container:
+              image: harness/comment-plugin:1.0.0
+            script: |
+              post-comments \
+                --comments-file /harness/review.json \
+                --repo <+trigger.repo> \
+                --pr-number <+trigger.pullReq>
+            env:
+              TOKEN: <+inputs.harnessKey>
+      platform:
+        os: linux
+        arch: arm64
+  inputs:
+    anthropicKey:
+      type: secret
+      default: account.autofix_anthropic_api_key
+    harnessKey:
+      type: secret
+      default: account.harness_api_key

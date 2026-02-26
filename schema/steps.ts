@@ -87,6 +87,11 @@ export interface StepLong {
      */
     template?: StepTemplate;
 
+    /**
+     * Agent defines an agent step.
+     */
+    agent?: StepAgent;
+
     //
     // Step Types : End
     //
@@ -470,3 +475,49 @@ export interface TestIntelligence {
 //
 
 export type Delegate = "inherit-from-infrastrcuture" | string | string[];
+
+/**
+ * StepAgent defines an agent step.
+ * @x-go-file step_agent.go
+ */
+export interface StepAgent {
+    /**
+     * Uses defines the agent image or marketplace reference.
+     */
+    uses: string;
+
+    /**
+     * With defines the agent configuration inputs.
+     */
+    with?: Record<string, any>;
+
+    /**
+     * Env defines environment variables passed to the agent container.
+     */
+    env?: Record<string, string>;
+
+    /**
+     * Tools defines the tools the agent can invoke at runtime.
+     */
+    tools?: string[];
+
+    /**
+     * McpAuth references a pipeline-level tools declaration for MCP auth.
+     */
+    mcp_auth?: string;
+
+    /**
+     * MaxTurns defines the maximum agentic turns before forced stop.
+     */
+    max_turns?: number;
+
+    /**
+     * Skills defines skill files to load into the agent.
+     */
+    skills?: string[];
+
+    /**
+     * Task defines the task prompt or path to task file.
+     */
+    task?: string;
+}

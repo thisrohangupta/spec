@@ -1,0 +1,25 @@
+# Cost Alert Agent - Triggered by CCM Events
+# Analyzes cost spikes and budget overages
+
+version: 1
+agent:
+  on:
+    - cost_spike:
+        threshold-percent: 25
+        resources:
+          - production-cluster
+    - budget_exceeded
+  stages:
+    - name: analyze
+      steps:
+        - name: cost_analysis
+          agent:
+            uses: harness/cost-analyzer:1.0.0
+            with:
+              resource: <+trigger.resource>
+              increase_percent: <+trigger.increasePercent>
+              current_cost: <+trigger.currentCost>
+            tools:
+              - read
+              - bash
+            max_turns: 15

@@ -37,6 +37,34 @@ export type EventType = "branch_protection_rule"
     | "workflow_call"
     | "workflow_dispatch"
     | "workflow_run"
+
+    // Harness CI Events
+    | "pipeline_failed"
+    | "build_failed"
+    | "test_failed"
+
+    // Harness CD Events
+    | "deploy"
+    | "deploy_failed"
+    | "canary"
+    | "rollback"
+    | "slo_breach"
+    | "post_deploy"
+
+    // Harness CCM Events
+    | "cost_spike"
+    | "budget_exceeded"
+    | "cost_anomaly"
+
+    // Harness STO Events
+    | "vulnerability_found"
+    | "scan_complete"
+    | "severity_threshold"
+
+    // Harness Platform Events
+    | "comment_mention"
+    | "repo_created"
+    | "flag_stale"
 ;
 
 export interface EventLong {
@@ -75,6 +103,34 @@ export interface EventLong {
     workflow_call?:any;
     workflow_dispatch?:any;
     workflow_run?:any;
+
+    // Harness CI Events
+    pipeline_failed?: PipelineFailedFilter;
+    build_failed?: PipelineFailedFilter;
+    test_failed?: PipelineFailedFilter;
+
+    // Harness CD Events
+    deploy?: DeployFilter;
+    deploy_failed?: DeployFilter;
+    canary?: DeployFilter;
+    rollback?: DeployFilter;
+    slo_breach?: SloFilter;
+    post_deploy?: DeployFilter;
+
+    // Harness CCM Events
+    cost_spike?: CostFilter;
+    budget_exceeded?: BudgetFilter;
+    cost_anomaly?: CostFilter;
+
+    // Harness STO Events
+    vulnerability_found?: VulnerabilityFilter;
+    scan_complete?: ScanFilter;
+    severity_threshold?: ScanFilter;
+
+    // Harness Platform Events
+    comment_mention?: CommentMentionFilter;
+    repo_created?: EventFilter;
+    flag_stale?: EventFilter;
 }
 
 export interface EventFilter {
@@ -100,4 +156,65 @@ export interface PullRequestFilter {
     "types"?: string | string[];
     "review-approved"?: boolean;
     "review-dismissed"?: boolean;
+}
+
+//
+// Harness CI Event Filters
+//
+
+export interface PipelineFailedFilter {
+    repos?: string | string[];
+    branches?: string | string[];
+    pipelines?: string | string[];
+}
+
+//
+// Harness CD Event Filters
+//
+
+export interface DeployFilter {
+    services?: string | string[];
+    environments?: string | string[];
+}
+
+export interface SloFilter {
+    services?: string | string[];
+    slos?: string | string[];
+}
+
+//
+// Harness CCM Event Filters
+//
+
+export interface CostFilter {
+    resources?: string | string[];
+    "threshold-percent"?: number;
+}
+
+export interface BudgetFilter {
+    budgets?: string | string[];
+}
+
+//
+// Harness STO Event Filters
+//
+
+export interface VulnerabilityFilter {
+    repos?: string | string[];
+    severity?: string | string[];
+    "scan-types"?: string | string[];
+}
+
+export interface ScanFilter {
+    repos?: string | string[];
+    "scan-types"?: string | string[];
+}
+
+//
+// Harness Platform Event Filters
+//
+
+export interface CommentMentionFilter {
+    agents?: string | string[];
+    repos?: string | string[];
 }

@@ -1,0 +1,39 @@
+# Security Remediation Agent - Triggered by Vulnerability Findings
+# Automatically triages and fixes security vulnerabilities
+
+version: 1
+agent:
+  on:
+    - vulnerability_found:
+        severity:
+          - critical
+          - high
+    - scan_complete
+  clone:
+    repo: <+trigger.repo>
+  stages:
+    - name: remediate
+      steps:
+        - name: security_agent
+          agent:
+            uses: harness/security-agent:1.0.0
+            with:
+              severity: <+trigger.severity>
+              component: <+trigger.component>
+            skills:
+              - /opt/agent/skills/security/SKILL.md
+            tools:
+              - read
+              - glob
+              - grep
+              - bash
+              - write
+            max_turns: 30
+            task: "Fix <+trigger.severity> vulnerability in <+trigger.component>"
+      platform:
+        os: linux
+        arch: arm64
+  inputs:
+    anthropicKey:
+      type: secret
+      default: account.autofix_anthropic_api_key
