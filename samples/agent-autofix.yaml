@@ -1,0 +1,45 @@
+# Autofix Agent - Triggered by CI Failures
+# Automatically diagnoses and fixes failing pipelines
+
+version: 1
+agent:
+  on:
+    - pipeline_failed
+    - build_failed
+    - test_failed
+  clone:
+    depth: 1
+    ref:
+      name: <+trigger.branch>
+      type: branch
+    repo: <+trigger.repo>
+  stages:
+    - name: autofix
+      steps:
+        - name: remediation_agent
+          agent:
+            uses: harness/remediation-agent:1.0.0
+            with:
+              execution_id: <+trigger.executionId>
+              working_directory: /harness
+            max_turns: 30
+        - name: coding_agent
+          agent:
+            uses: harness/coding-agent:1.0.0
+            with:
+              task_file_path: /harness/task.txt
+              working_directory: /harness
+            tools:
+              - read
+              - write
+              - grep
+              - bash
+            env:
+              ANTHROPIC_API_KEY: <+inputs.anthropicKey>
+      platform:
+        os: linux
+        arch: arm64
+  inputs:
+    anthropicKey:
+      type: secret
+      default: account.autofix_anthropic_api_key

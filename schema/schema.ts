@@ -1,3 +1,4 @@
+import { Agent } from "./agent";
 import { Concurrency } from "./concurrency";
 import { Environment } from "./environment";
 import { Permissions } from "./permissions";
@@ -20,6 +21,13 @@ export interface Schema {
      * Pipeline defines the pipeline configuration.
      */
     pipeline?: Pipeline;
+
+    /**
+     * Agent defines the agent configuration.
+     * Agents are pipelines that execute in response
+     * to Harness platform events.
+     */
+    agent?: Agent;
 
     /**
      * Environment defines a deployment environment.
