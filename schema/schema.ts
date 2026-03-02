@@ -1,3 +1,4 @@
+import { Agent } from "./agent";
 import { Concurrency } from "./concurrency";
 import { Environment } from "./environment";
 import { Permissions } from "./permissions";
@@ -20,6 +21,16 @@ export interface Schema {
      * Pipeline defines the pipeline configuration.
      */
     pipeline?: Pipeline;
+
+    /**
+     * Agent defines an AI agent pipeline configuration.
+     * Agents are pipelines with AI-specific capabilities including
+     * tools, MCP servers, rules, and skills.
+     * 
+     * This is a top-level alias for Pipeline with agent-specific fields.
+     * Mutually exclusive with pipeline at runtime.
+     */
+    agent?: Agent;
 
     /**
      * Environment defines a deployment environment.

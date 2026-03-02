@@ -1,0 +1,79 @@
+# Step-level Agent Example
+# Demonstrates StepAgent with tools, mcp_servers, rules, skills at step level
+# Step-level config merges with pipeline-level config
+
+version: 1
+pipeline:
+  clone:
+    depth: 1
+    repo: <+inputs.repo>
+
+  stages:
+    - name: code-review
+      steps:
+        # Regular run step (not an agent)
+        - name: setup
+          run:
+            shell: bash
+            script: |
+              echo "Setting up environment..."
+              npm install
+
+        # Agent step with step-level configuration
+        - name: code_review_agent
+          agent:
+            container:
+              image: harness/code-review-agent:1.0.0
+            with:
+              pr_number: <+inputs.prNumber>
+              review_type: "comprehensive"
+            env:
+              ANTHROPIC_API_KEY: <+inputs.llmConnector.token>
+          # Agent-specific fields at step level
+          tools:
+            read: true
+            write: false  # Read-only for code review
+            grep: true
+            bash:
+              - "git diff"
+              - "git log"
+          mcp_servers:
+            github:
+              url: https://api.github.com/mcp
+              headers:
+                Authorization: "Bearer <+inputs.githubToken>"
+              allowed:
+                - get_pull_request
+                - list_comments
+                - create_review
+            jira:
+              container: mcp/jira:latest
+              env:
+                JIRA_API_TOKEN: <+secrets.getValue("jira_token")>
+              allowed:
+                - get_issue
+                - add_comment
+          rules:
+            - "Focus on code quality and best practices"
+            - "Do not approve PRs with security vulnerabilities"
+          skills:
+            - ./skills/code-review.md
+          max_turns: 25
+          task: "Review the pull request and provide detailed feedback"
+
+        # Another regular step after the agent
+        - name: post-review
+          run:
+            shell: bash
+            script: |
+              echo "Code review completed"
+
+  inputs:
+    repo:
+      type: string
+    prNumber:
+      type: number
+    githubToken:
+      type: secret
+    llmConnector:
+      type: connector

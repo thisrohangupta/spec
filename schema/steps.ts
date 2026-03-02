@@ -1,3 +1,4 @@
+import {Tools, McpServer} from "./agent";
 import {Container} from "./container";
 import {CloneRef} from "./clone";
 import {FailureStrategy} from "./failure";
@@ -36,6 +37,11 @@ export interface StepLong {
      * Run defines a run step.
      */
     run?: string | StepRun;
+
+    /**
+     * Agent defines an agent step.
+     */
+    agent?: string | StepAgent;
 
     /**
      * Test defines a run test step
@@ -470,3 +476,62 @@ export interface TestIntelligence {
 //
 
 export type Delegate = "inherit-from-infrastrcuture" | string | string[];
+
+//
+// StepAgent (Step-Level Agent)
+//
+
+/**
+ * StepAgent defines an AI agent step configuration. Agent-specific fields (tools, mcp_servers, rules, skills) at step level are merged with pipeline-level Agent configuration using merge strategy.
+ * @x-go-file step_agent.go
+ */
+export interface StepAgent {
+    /**
+     * Container runs the agent inside a container.
+     */
+    container?: Container;
+
+    /**
+     * Env defines the environment variables for the agent.
+     */
+    env?: Record<string, string>;
+
+    /**
+     * With defines configuration parameters passed to the agent.
+     */
+    with?: Record<string, any>;
+
+    /**
+     * Tools configures built-in tools for this agent step.
+     * Merged with pipeline-level tools configuration.
+     */
+    tools?: Tools;
+
+    /**
+     * McpServers defines MCP servers for this agent step.
+     * Merged with pipeline-level mcp_servers configuration.
+     */
+    mcp_servers?: Record<string, McpServer>;
+
+    /**
+     * Rules defines behavioral constraints for this agent step.
+     * Merged with pipeline-level rules.
+     */
+    rules?: string[];
+
+    /**
+     * Skills defines skill files for this agent step.
+     * Merged with pipeline-level skills.
+     */
+    skills?: string[];
+
+    /**
+     * MaxTurns defines the maximum number of agentic turns before forced stop.
+     */
+    max_turns?: number;
+
+    /**
+     * Task defines the task prompt or path to a task file.
+     */
+    task?: string;
+}
