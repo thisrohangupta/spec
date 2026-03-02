@@ -1,0 +1,95 @@
+# Autofix Agent - Pipeline-level agent example
+# Demonstrates tools, mcp_servers, rules, and skills at pipeline level
+
+version: 1
+agent:
+  # Built-in tools available to all agent steps
+  tools:
+    read: true
+    write: true
+    grep: true
+    bash:
+      - "git:*"
+      - "npm:*"
+      - "echo"
+      - "cat"
+
+  # MCP servers available to all agent steps
+  mcp_servers:
+    slack:
+      container: mcp/slack:latest
+      env:
+        SLACK_BOT_TOKEN: <+secrets.getValue("slack_bot_token")>
+      allowed:
+        - send_message
+        - get_channel_history
+
+  # Behavioral rules (file paths or inline)
+  rules:
+    - ./agents.md
+    - "Never modify files outside the repository root"
+    - "Always run tests before committing changes"
+
+  # Skill files
+  skills:
+    - ./skills/coding.md
+    - ./skills/debugging.md
+
+  clone:
+    depth: 1
+    ref:
+      name: <+inputs.branch>
+      type: branch
+    repo: <+inputs.repo>
+
+  stages:
+    - name: autofix
+      steps:
+        - name: remediation_agent
+          run:
+            container:
+              image: harness/remediation-agent:1.0.0
+            with:
+              detailed_logging: "true"
+              harness_api_key: <+inputs.harnessKey>
+              output_dir: /harness/autofix
+              working_directory: /harness
+              harness_execution_id: <+inputs.executionId>
+            env:
+              ANTHROPIC_API_KEY: <+inputs.llmConnector.token>
+
+        - name: coding_agent
+          run:
+            container:
+              image: harness/coding-agent:1.0.0
+            with:
+              detailed_logging: "true"
+              max_iterations: "50"
+              task_file_path: /harness/autofix/task.txt
+              working_directory: /harness
+            env:
+              ANTHROPIC_API_KEY: <+inputs.llmConnector.token>
+
+        - name: show_git_diff
+          run:
+            shell: bash
+            script: |-
+              git add -A
+              git diff --cached
+
+  inputs:
+    repo:
+      type: string
+      description: Repository to clone
+    branch:
+      type: string
+      description: Branch to checkout
+    executionId:
+      type: string
+      description: Harness execution ID for context
+    harnessKey:
+      type: secret
+      description: Harness API key
+    llmConnector:
+      type: connector
+      description: LLM connector with API token

@@ -1,0 +1,81 @@
+# MCP Server Configuration Examples
+# Demonstrates all 4 MCP transport types: stdio, container, HTTP, registry
+
+version: 1
+agent:
+  tools:
+    read: true
+    write: true
+    bash: true
+
+  mcp_servers:
+    # 1. Stdio MCP Server (command + args)
+    # Runs a local process with stdin/stdout communication
+    serena:
+      command: "uvx"
+      args: ["--from", "git+https://github.com/oraios/serena", "serena"]
+      allowed: ["*"]
+
+    # 2. Container MCP Server (Docker image)
+    # Runs in an isolated container
+    ast-grep:
+      container: mcp/ast-grep:latest
+      allowed: ["*"]
+
+    notion:
+      container: mcp/notion:latest
+      env:
+        NOTION_TOKEN: <+secrets.getValue("notion_token")>
+      allowed:
+        - search_pages
+        - get_page
+        - get_database
+        - query_database
+
+    # 3. HTTP MCP Server (remote endpoint)
+    # Connects to a remote MCP server via HTTP
+    microsoftdocs:
+      url: https://learn.microsoft.com/api/mcp
+      allowed: ["*"]
+
+    deepwiki:
+      url: https://mcp.deepwiki.com/sse
+      allowed:
+        - read_wiki_structure
+        - read_wiki_contents
+        - ask_question
+
+    authenticated-api:
+      url: https://api.example.com/mcp
+      headers:
+        Authorization: "Bearer <+secrets.getValue("api_token")>"
+        X-Custom-Header: "custom-value"
+      allowed: ["*"]
+
+    # 4. Registry-based MCP Server
+    # References server from MCP registry for discovery/versioning
+    markitdown:
+      registry: https://api.mcp.github.com/v0/servers/microsoft/markitdown
+      container: ghcr.io/microsoft/markitdown
+      allowed: ["*"]
+
+    filesystem:
+      registry: https://api.mcp.github.com/v0/servers/modelcontextprotocol/filesystem
+      command: "npx"
+      args: ["-y", "@modelcontextprotocol/server-filesystem"]
+      allowed:
+        - read_file
+        - write_file
+        - list_directory
+
+  stages:
+    - name: demo
+      steps:
+        - name: mcp_demo_agent
+          run:
+            container:
+              image: harness/coding-agent:1.0.0
+            with:
+              task: "Demonstrate MCP server usage"
+            env:
+              ANTHROPIC_API_KEY: <+inputs.llmConnector.token>

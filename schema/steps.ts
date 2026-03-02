@@ -1,3 +1,4 @@
+import {Tools, McpServer} from "./agent";
 import {Container} from "./container";
 import {CloneRef} from "./clone";
 import {FailureStrategy} from "./failure";
@@ -470,3 +471,55 @@ export interface TestIntelligence {
 //
 
 export type Delegate = "inherit-from-infrastrcuture" | string | string[];
+
+//
+// StepAgent (Step-Level Agent)
+//
+
+/**
+ * StepAgent extends StepLong with AI agent-specific configuration.
+ * 
+ * IMPORTANT: Only the `run` step type is supported for agent steps.
+ * Other step types (action, template, clone, etc.) inherited from StepLong
+ * should be rejected at runtime validation.
+ * 
+ * Agent-specific fields (tools, mcp_servers, rules, skills) at step level
+ * are merged with pipeline-level Agent configuration using merge strategy.
+ * 
+ * @x-go-file step_agent.go
+ */
+export interface StepAgent extends StepLong {
+    /**
+     * Tools configures built-in tools for this agent step.
+     * Merged with pipeline-level tools configuration.
+     */
+    tools?: Tools;
+
+    /**
+     * McpServers defines MCP servers for this agent step.
+     * Merged with pipeline-level mcp_servers configuration.
+     */
+    mcp_servers?: Record<string, McpServer>;
+
+    /**
+     * Rules defines behavioral constraints for this agent step.
+     * Merged with pipeline-level rules.
+     */
+    rules?: string[];
+
+    /**
+     * Skills defines skill files for this agent step.
+     * Merged with pipeline-level skills.
+     */
+    skills?: string[];
+
+    /**
+     * MaxTurns defines the maximum number of agentic turns before forced stop.
+     */
+    max_turns?: number;
+
+    /**
+     * Task defines the task prompt or path to a task file.
+     */
+    task?: string;
+}

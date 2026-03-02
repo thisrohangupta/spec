@@ -95,6 +95,142 @@
       ],
       "type": "string"
     },
+    "Agent": {
+      "description": "Agent extends Pipeline with AI agent-specific configuration. Agents are pipelines that can leverage AI capabilities including built-in tools, MCP servers, rules, and skills. This is a top-level alias for Pipeline with agent-specific fields. Use this when the entire pipeline is an AI agent workflow.",
+      "properties": {
+        "barriers": {
+          "description": "Barriers provides optional pipeline barriers.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "clone": {
+          "$ref": "#/definitions/Clone",
+          "description": "Clone overrides the default clone behavior."
+        },
+        "concurrency": {
+          "$ref": "#/definitions/Concurrency",
+          "description": "Concurrency groups provide a way to limit concurrency execution of pipelines that share the same concurrency key."
+        },
+        "default": {},
+        "delegate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "Delegage defines the default delegate that should handle stage execution. This is optional."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Env provides global environment variables that propagate to all pipeline steps.",
+          "type": "object"
+        },
+        "environment": {
+          "$ref": "#/definitions/EnvironmentRef",
+          "description": "Environment defines the target deployment environment (e.g. development, prod)."
+        },
+        "generate": {
+          "$ref": "#/definitions/Stage",
+          "description": "Generate defines custom logic to dynamically generate a pipeline."
+        },
+        "id": {
+          "deprecated": true,
+          "description": "Id provides a unique pipeline identifer.",
+          "type": "string"
+        },
+        "if": {
+          "description": "If provides conditional pipeline execution logic. If the condition resolves to false, the pipeline is skipped.",
+          "type": "string"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Input"
+          },
+          "description": "Inputs provides pipeline input variables.",
+          "type": "object"
+        },
+        "jobs": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Stage"
+          },
+          "description": "Jobs defines jobs (stages) in the pipeline.\n\nThis property is available solely for the purpose of backward compatibility with GitHub Actions.",
+          "type": "object"
+        },
+        "mcp_servers": {
+          "additionalProperties": {
+            "$ref": "#/definitions/McpServer"
+          },
+          "description": "McpServers defines Model Context Protocol servers available to all agent steps. Step-level mcp_servers configuration will be merged with this.",
+          "type": "object"
+        },
+        "name": {
+          "deprecated": true,
+          "description": "Name provides a pipeline name.",
+          "type": "string"
+        },
+        "on": {
+          "$ref": "#/definitions/On",
+          "description": "On provides condition pipeline execution logic based on trigger event and action mapping. If the conditional logic resolves to folse, the pipeline is skipped."
+        },
+        "permissions": {
+          "$ref": "#/definitions/Permissions"
+        },
+        "repo": {
+          "$ref": "#/definitions/Repository",
+          "description": "Repo overrides the default repository."
+        },
+        "rules": {
+          "description": "Rules defines behavioral constraints for the agent. Can be file paths (e.g., \"./agents.md\") or inline rule text. Validation engine determines if value is a path or inline content.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "service": {
+          "$ref": "#/definitions/ServiceRef",
+          "description": "Service defines the service being deployed."
+        },
+        "skills": {
+          "description": "Skills defines skill files (markdown instructions) for the agent. Can be file paths or inline content.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "stages": {
+          "description": "Stages provides a list of stages. Each pipeline is made up of one or more stages that executes sequentially.",
+          "items": {
+            "$ref": "#/definitions/Stage"
+          },
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/definitions/Status",
+          "description": "Status overrides the default status behavior."
+        },
+        "timeout": {
+          "description": "Timeout defines the step timeout duration.",
+          "format": "duration",
+          "type": "string"
+        },
+        "tools": {
+          "$ref": "#/definitions/Tools",
+          "description": "Tools configures built-in tools available to all agent steps. Step-level tools configuration will be merged with this."
+        }
+      },
+      "type": "object",
+      "x-go-file": "agent.go"
+    },
     "Cache": {
       "description": "Cache defines pipeline caching behavior.",
       "properties": {
@@ -514,7 +650,7 @@
           },
           "type": "array"
         },
-        "parallel": {
+        "sequential": {
           "type": "boolean"
         }
       },
@@ -698,6 +834,19 @@
               "type": "array"
             }
           ]
+        },
+        "exitcode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ]
         }
       },
       "type": "object"
@@ -818,7 +967,9 @@
             "duration",
             "choice",
             "environment",
-            "secret"
+            "secret",
+            "step",
+            "object"
           ],
           "type": "string"
         }
@@ -868,6 +1019,57 @@
       },
       "type": "object",
       "x-go-file": "strategy_matrix.go"
+    },
+    "McpServer": {
+      "description": "McpServer defines a Model Context Protocol server configuration. Supports multiple transport types: stdio (command), container (docker), HTTP (url), and registry-based servers.",
+      "properties": {
+        "allowed": {
+          "description": "Allowed specifies which tools from this MCP server are available. Use [\"*\"] to allow all tools, or list specific tool names.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "args": {
+          "description": "Args specifies command arguments for stdio-based MCP servers.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "description": "Command specifies the command to run for stdio-based MCP servers. Used with args for process-based servers (e.g., \"npx\", \"uvx\").",
+          "type": "string"
+        },
+        "container": {
+          "description": "Container specifies a Docker image for container-based MCP servers. The container is run with stdin/stdout communication.",
+          "type": "string"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Env specifies environment variables passed to the MCP server.",
+          "type": "object"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Headers specifies HTTP headers for authentication with remote MCP servers. Commonly used for Bearer tokens or API keys.",
+          "type": "object"
+        },
+        "registry": {
+          "description": "Registry specifies a reference to an MCP server in a registry. Used for discovery and version management.",
+          "type": "string"
+        },
+        "url": {
+          "description": "Url specifies the HTTP endpoint for remote MCP servers. Must implement the MCP specification over HTTP.",
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "x-go-file": "mcp_server.go"
     },
     "Mount": {
       "anyOf": [
@@ -1492,6 +1694,10 @@
           "deprecated": "use \"template\" instead",
           "description": "Action defines re-usable pipeline steps and stages."
         },
+        "agent": {
+          "$ref": "#/definitions/Agent",
+          "description": "Agent defines an AI agent pipeline configuration. Agents are pipelines with AI-specific capabilities including tools, MCP servers, rules, and skills.\n\nThis is a top-level alias for Pipeline with agent-specific fields. Mutually exclusive with pipeline at runtime."
+        },
         "concurrency": {
           "$ref": "#/definitions/Concurrency",
           "description": "Concurrency groups provide a way to limit concurrency execution of pipelines that share the same concurrency key."
@@ -1610,7 +1816,7 @@
           },
           "type": "array"
         },
-        "parallel": {
+        "sequential": {
           "type": "boolean"
         }
       },
@@ -1628,6 +1834,10 @@
         "cache": {
           "$ref": "#/definitions/Cache",
           "description": "Cache defines the cache configuration."
+        },
+        "chain": {
+          "$ref": "#/definitions/StageChain",
+          "description": "Chain defines a chained pipeline."
         },
         "clone": {
           "$ref": "#/definitions/Clone",
@@ -1786,6 +1996,18 @@
       },
       "type": "object",
       "x-go-file": "stage_approval.go"
+    },
+    "StageChain": {
+      "properties": {
+        "uses": {
+          "type": "string"
+        },
+        "with": {
+          "type": "object"
+        }
+      },
+      "type": "object",
+      "x-go-file": "stage_template.go"
     },
     "StageGroup": {
       "properties": {
@@ -2350,6 +2572,39 @@
         }
       },
       "type": "object"
+    },
+    "Tools": {
+      "description": "Tools configures built-in tools available to the agent.",
+      "properties": {
+        "bash": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          ],
+          "description": "Bash configures shell command execution.\n- true: enables default safe commands\n- false: disables bash\n- string[]: list of allowed commands (e.g., [\"echo\", \"ls\", \"git:*\"])"
+        },
+        "grep": {
+          "description": "Grep enables grep/search capability.",
+          "type": "boolean"
+        },
+        "read": {
+          "description": "Read enables file read capability.",
+          "type": "boolean"
+        },
+        "write": {
+          "description": "Write enables file write capability.",
+          "type": "boolean"
+        }
+      },
+      "type": "object",
+      "x-go-file": "tools.go"
     },
     "Volume": {
       "properties": {
