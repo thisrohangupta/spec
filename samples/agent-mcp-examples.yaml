@@ -72,7 +72,7 @@ agent:
     - name: demo
       steps:
         - name: mcp_demo_agent
-          run:
+          agent:
             container:
               image: harness/coding-agent:1.0.0
             with:

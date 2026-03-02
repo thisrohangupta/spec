@@ -20,10 +20,8 @@ pipeline:
               npm install
 
         # Agent step with step-level configuration
-        # This extends StepLong - only `run` step type is valid
-        # tools, mcp_servers, rules, skills are agent-specific fields
         - name: code_review_agent
-          run:
+          agent:
             container:
               image: harness/code-review-agent:1.0.0
             with:

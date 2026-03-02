@@ -39,6 +39,11 @@ export interface StepLong {
     run?: string | StepRun;
 
     /**
+     * Agent defines an agent step.
+     */
+    agent?: string | StepAgent;
+
+    /**
      * Test defines a run test step
      */
     "run-test"?: StepTest;
@@ -477,18 +482,25 @@ export type Delegate = "inherit-from-infrastrcuture" | string | string[];
 //
 
 /**
- * StepAgent extends StepLong with AI agent-specific configuration.
- * 
- * IMPORTANT: Only the `run` step type is supported for agent steps.
- * Other step types (action, template, clone, etc.) inherited from StepLong
- * should be rejected at runtime validation.
- * 
- * Agent-specific fields (tools, mcp_servers, rules, skills) at step level
- * are merged with pipeline-level Agent configuration using merge strategy.
- * 
+ * StepAgent defines an AI agent step configuration. Agent-specific fields (tools, mcp_servers, rules, skills) at step level are merged with pipeline-level Agent configuration using merge strategy.
  * @x-go-file step_agent.go
  */
-export interface StepAgent extends StepLong {
+export interface StepAgent {
+    /**
+     * Container runs the agent inside a container.
+     */
+    container?: Container;
+
+    /**
+     * Env defines the environment variables for the agent.
+     */
+    env?: Record<string, string>;
+
+    /**
+     * With defines configuration parameters passed to the agent.
+     */
+    with?: Record<string, any>;
+
     /**
      * Tools configures built-in tools for this agent step.
      * Merged with pipeline-level tools configuration.

@@ -46,7 +46,7 @@ agent:
     - name: autofix
       steps:
         - name: remediation_agent
-          run:
+          agent:
             container:
               image: harness/remediation-agent:1.0.0
             with:
@@ -59,7 +59,7 @@ agent:
               ANTHROPIC_API_KEY: <+inputs.llmConnector.token>
 
         - name: coding_agent
-          run:
+          agent:
             container:
               image: harness/coding-agent:1.0.0
             with:
