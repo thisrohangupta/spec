@@ -2105,6 +2105,61 @@
       "type": "object",
       "x-go-file": "step_action.go"
     },
+    "StepAgent": {
+      "description": "StepAgent defines an AI agent step configuration. Agent-specific fields (tools, mcp_servers, rules, skills) at step level are merged with pipeline-level Agent configuration using merge strategy.",
+      "properties": {
+        "container": {
+          "$ref": "#/definitions/Container",
+          "description": "Container runs the agent inside a container."
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Env defines the environment variables for the agent.",
+          "type": "object"
+        },
+        "max_turns": {
+          "description": "MaxTurns defines the maximum number of agentic turns before forced stop.",
+          "type": "number"
+        },
+        "mcp_servers": {
+          "additionalProperties": {
+            "$ref": "#/definitions/McpServer"
+          },
+          "description": "McpServers defines MCP servers for this agent step. Merged with pipeline-level mcp_servers configuration.",
+          "type": "object"
+        },
+        "rules": {
+          "description": "Rules defines behavioral constraints for this agent step. Merged with pipeline-level rules.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skills": {
+          "description": "Skills defines skill files for this agent step. Merged with pipeline-level skills.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "task": {
+          "description": "Task defines the task prompt or path to a task file.",
+          "type": "string"
+        },
+        "tools": {
+          "$ref": "#/definitions/Tools",
+          "description": "Tools configures built-in tools for this agent step. Merged with pipeline-level tools configuration."
+        },
+        "with": {
+          "description": "With defines configuration parameters passed to the agent.",
+          "type": "object"
+        }
+      },
+      "type": "object",
+      "x-go-file": "step_agent.go"
+    },
     "StepApproval": {
       "properties": {
         "env": {
@@ -2238,6 +2293,17 @@
         "action": {
           "$ref": "#/definitions/StepAction",
           "description": "Action defines an action step."
+        },
+        "agent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "$ref": "#/definitions/StepAgent"
+            }
+          ],
+          "description": "Agent defines an agent step."
         },
         "approval": {
           "$ref": "#/definitions/StepApproval",
