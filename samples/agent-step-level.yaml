@@ -1,5 +1,5 @@
 # Step-level Agent Example
-# Demonstrates StepAgent with tools, mcp_servers, rules, skills at step level
+# Demonstrates StepAgent with mcp, rules, skills at step level
 # Step-level config merges with pipeline-level config
 
 version: 1
@@ -30,14 +30,7 @@ pipeline:
             env:
               ANTHROPIC_API_KEY: <+inputs.llmConnector.token>
           # Agent-specific fields at step level
-          tools:
-            read: true
-            write: false  # Read-only for code review
-            grep: true
-            bash:
-              - "git diff"
-              - "git log"
-          mcp_servers:
+          mcp:
             github:
               url: https://api.github.com/mcp
               headers:

@@ -1,4 +1,4 @@
-import {Tools, McpServer} from "./agent";
+import {McpServer} from "./agent";
 import {Container} from "./container";
 import {CloneRef} from "./clone";
 import {FailureStrategy} from "./failure";
@@ -482,7 +482,7 @@ export type Delegate = "inherit-from-infrastrcuture" | string | string[];
 //
 
 /**
- * StepAgent defines an AI agent step configuration. Agent-specific fields (tools, mcp_servers, rules, skills) at step level are merged with pipeline-level Agent configuration using merge strategy.
+ * StepAgent defines an AI agent step configuration. Agent-specific fields (mcp, rules, skills) at step level are merged with pipeline-level Agent configuration using merge strategy.
  * @x-go-file step_agent.go
  */
 export interface StepAgent {
@@ -502,19 +502,15 @@ export interface StepAgent {
     with?: Record<string, any>;
 
     /**
-     * Tools configures built-in tools for this agent step.
-     * Merged with pipeline-level tools configuration.
+     * Mcp defines MCP servers for this agent step.
+     * Merged with pipeline-level mcp configuration.
      */
-    tools?: Tools;
-
-    /**
-     * McpServers defines MCP servers for this agent step.
-     * Merged with pipeline-level mcp_servers configuration.
-     */
-    mcp_servers?: Record<string, McpServer>;
+    mcp?: Record<string, McpServer>;
 
     /**
      * Rules defines behavioral constraints for this agent step.
+     * Supports file paths, inline text, and entity references
+     * (e.g., "account.golang", "project.*").
      * Merged with pipeline-level rules.
      */
     rules?: string[];

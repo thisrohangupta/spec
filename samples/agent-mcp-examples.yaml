@@ -3,12 +3,7 @@
 
 version: 1
 agent:
-  tools:
-    read: true
-    write: true
-    bash: true
-
-  mcp_servers:
+  mcp:
     # 1. Stdio MCP Server (command + args)
     # Runs a local process with stdin/stdout communication
     serena:

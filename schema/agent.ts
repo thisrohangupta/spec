@@ -1,37 +1,9 @@
 import { Pipeline } from "./pipeline";
+import { Container } from "./container";
 
-//
-// Built-in Tools Configuration
-//
-
-/**
- * Tools configures built-in tools available to the agent.
- * @x-go-file tools.go
- */
-export interface Tools {
-    /**
-     * Read enables file read capability.
-     */
-    read?: boolean;
-
-    /**
-     * Write enables file write capability.
-     */
-    write?: boolean;
-
-    /**
-     * Grep enables grep/search capability.
-     */
-    grep?: boolean;
-
-    /**
-     * Bash configures shell command execution.
-     * - true: enables default safe commands
-     * - false: disables bash
-     * - string[]: list of allowed commands (e.g., ["echo", "ls", "git:*"])
-     */
-    bash?: boolean | string[];
-}
+// Built-in tools (read, write, grep, bash) are all available to the agent
+// by default. Containerization provides the security boundary, so per-tool
+// restrictions are not supported at this time.
 
 //
 // MCP Server Configuration
@@ -56,10 +28,11 @@ export interface McpServer {
     args?: string[];
 
     /**
-     * Container specifies a Docker image for container-based MCP servers.
-     * The container is run with stdin/stdout communication.
+     * Container specifies a container for running MCP servers.
+     * Supports string shorthand (image name) or full Container configuration
+     * with connector for auth, volumes, environment, etc.
      */
-    container?: string;
+    container?: Container;
 
     /**
      * Url specifies the HTTP endpoint for remote MCP servers.
@@ -96,26 +69,24 @@ export interface McpServer {
 //
 
 /**
- * Agent extends Pipeline with AI agent-specific configuration. Agents are pipelines that can leverage AI capabilities including built-in tools, MCP servers, rules, and skills. This is a top-level alias for Pipeline with agent-specific fields. Use this when the entire pipeline is an AI agent workflow.
+ * Agent extends Pipeline with AI agent-specific configuration. Agents are pipelines that can leverage AI capabilities including MCP servers, rules, and skills. All built-in tools (read, write, grep, bash) are available by default. This is a top-level alias for Pipeline with agent-specific fields. Use this when the entire pipeline is an AI agent workflow.
  * @x-go-file agent.go
  */
 export interface Agent extends Pipeline {
     /**
-     * Tools configures built-in tools available to all agent steps.
-     * Step-level tools configuration will be merged with this.
+     * Mcp defines Model Context Protocol servers available to all agent steps.
+     * Step-level mcp configuration will be merged with this.
      */
-    tools?: Tools;
-
-    /**
-     * McpServers defines Model Context Protocol servers available to all agent steps.
-     * Step-level mcp_servers configuration will be merged with this.
-     */
-    mcp_servers?: Record<string, McpServer>;
+    mcp?: Record<string, McpServer>;
 
     /**
      * Rules defines behavioral constraints for the agent.
-     * Can be file paths (e.g., "./agents.md") or inline rule text.
-     * Validation engine determines if value is a path or inline content.
+     * Values can be:
+     * - File paths (e.g., "./agents.md")
+     * - Inline rule text (e.g., "Never modify files outside the repository root")
+     * - Entity references (e.g., "account.golang", "org.security", "project.*")
+     *   which read rules stored at the account, org, or project level.
+     * Validation engine determines the type of each value.
      */
     rules?: string[];
 

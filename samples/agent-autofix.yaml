@@ -1,21 +1,10 @@
 # Autofix Agent - Pipeline-level agent example
-# Demonstrates tools, mcp_servers, rules, and skills at pipeline level
+# Demonstrates mcp, rules, and skills at pipeline level
 
 version: 1
 agent:
-  # Built-in tools available to all agent steps
-  tools:
-    read: true
-    write: true
-    grep: true
-    bash:
-      - "git:*"
-      - "npm:*"
-      - "echo"
-      - "cat"
-
   # MCP servers available to all agent steps
-  mcp_servers:
+  mcp:
     slack:
       container: mcp/slack:latest
       env:
@@ -24,11 +13,13 @@ agent:
         - send_message
         - get_channel_history
 
-  # Behavioral rules (file paths or inline)
+  # Behavioral rules (file paths, inline, or entity references)
   rules:
     - ./agents.md
     - "Never modify files outside the repository root"
     - "Always run tests before committing changes"
+    - account.golang        # read rules from account-level entity
+    - project.*             # read all rules from project-level entities
 
   # Skill files
   skills:
