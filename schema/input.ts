@@ -14,9 +14,16 @@ export interface Input {
       | "duration"
       | "choice"      // GitHub compatibility
       | "environment" // GitHub compatibility
+      | "connector"
       | "secret"
       | "step"
       | "object"
+
+    /**
+     * AllowedScopes constrains the scopes from which a runtime
+     * resource binding can select a connector.
+     */
+    allowedScopes?: ("system" | "account" | "org" | "project")[];
 
     /**
      * Description defines the input description.

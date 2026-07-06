@@ -109,6 +109,43 @@ pipeline:
 	}
 }
 
+func TestParseConnectorInputAllowedScopes(t *testing.T) {
+	out, err := ParseString(`
+workflow:
+  inputs:
+    connector:
+      type: connector
+      required: true
+      allowedScopes:
+        - account
+        - org
+  steps:
+    - run: echo hello
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workflow, _, err := out.CanonicalWorkflow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workflow == nil {
+		t.Fatal("expected canonical workflow")
+	}
+
+	connector := workflow.Inputs["connector"]
+	if connector == nil {
+		t.Fatal("expected connector input")
+	}
+	if got, want := connector.Type, "connector"; got != want {
+		t.Fatalf("got input type %q, want %q", got, want)
+	}
+	if got, want := connector.AllowedScopes, []string{"account", "org"}; !cmp.Equal(got, want) {
+		t.Fatalf("got allowed scopes %v, want %v", got, want)
+	}
+}
+
 func TestNormalizedWorkflowRootSteps(t *testing.T) {
 	out, err := ParseString(`
 workflow:
