@@ -43,6 +43,25 @@ agent:
 
 A document should define only one of these root keys.
 
+## Connector inputs
+
+Connector inputs model runtime resource binding without making workflow scope
+part of the workflow schema. `allowedScopes` limits the connector scopes the
+caller may bind at runtime.
+
+```yaml
+workflow:
+  inputs:
+    connector:
+      type: connector
+      required: true
+      allowedScopes:
+        - account
+        - org
+  steps:
+    - run: echo using ${{ inputs.connector }}
+```
+
 ## Root steps
 
 Stages are optional. If `steps` is defined directly under the workflow, those

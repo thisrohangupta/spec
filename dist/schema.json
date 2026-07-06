@@ -772,6 +772,19 @@
     },
     "Input": {
       "properties": {
+        "allowedScopes": {
+          "description": "AllowedScopes constrains the scopes from which a runtime resource binding can select a connector.",
+          "items": {
+            "enum": [
+              "system",
+              "account",
+              "org",
+              "project"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
         "autofocus": {
           "description": "Autofocus configures the form element autofocus attribute.",
           "type": "boolean"
@@ -831,6 +844,7 @@
             "duration",
             "choice",
             "environment",
+            "connector",
             "secret",
             "step",
             "object"

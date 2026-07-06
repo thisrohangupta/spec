@@ -1,0 +1,11 @@
+# connector inputs bind scoped resources at runtime
+workflow:
+  inputs:
+    connector:
+      type: connector
+      required: true
+      allowedScopes:
+        - account
+        - org
+  steps:
+    - run: echo ${{ inputs.connector }}
